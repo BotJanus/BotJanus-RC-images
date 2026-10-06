@@ -55,12 +55,6 @@ def main():
             name="image_cleanup_bot",
             daemon=True,
         ),
-        threading.Thread(
-            target=run_bot,
-            args=("ai_detector", ai_detector.main),
-            name="ai_detector",
-            daemon=True,
-        ),
     ]
 
     for t in threads:
