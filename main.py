@@ -18,7 +18,7 @@ import threading
 import pywikibot
 import license_bot
 import image_cleanup_bot
-import ai_detector
+import archives.ai_detector as ai_detector
 
 # Initialisation de la session Pywikibot globale
 site = pywikibot.Site("fr", "vikidia")
