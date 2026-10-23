@@ -15,11 +15,20 @@ Utilisation (dans main.py, après logging.basicConfig) :
     import discord_logger
     discord_logger.install()          # lit DISCORD_WEBHOOK_URL dans l'env
 
-Variables d'environnement :
-    DISCORD_WEBHOOK_URL   URL du webhook (obligatoire, sinon rien n'est fait)
+Deux modes d'envoi (le premier trouvé est utilisé) :
+  1. Compte du bot :  DISCORD_BOT_TOKEN + DISCORD_LOG_CHANNEL_ID
+  2. Webhook :        DISCORD_WEBHOOK_URL
+
+Les variables sont lues dans l'environnement, puis dans un fichier d'env
+(ordre : $DISCORD_ENV_FILE, env/rc-images.env, .env — à côté de ce fichier).
+
+Variables :
+    DISCORD_BOT_TOKEN       token du compte bot (mode 1)
+    DISCORD_LOG_CHANNEL_ID  id du salon où poster (mode 1)
+    DISCORD_WEBHOOK_URL     URL du webhook (mode 2)
     DISCORD_LOG_LEVEL     niveau minimum envoyé (défaut : INFO)
     DISCORD_LOG_TITLE     titre affiché au-dessus de chaque message
-    DISCORD_LOG_USERNAME  nom d'affichage du webhook (optionnel)
+    DISCORD_LOG_USERNAME  nom d'affichage du webhook (mode 2, optionnel)
     DISCORD_LOG_BATCH     secondes d'attente pour regrouper les logs (défaut : 2)
 """
 
@@ -32,7 +41,7 @@ import time
 
 import requests
 
-DEFAULT_TITLE = "📡 **BotJanus RC Images (licences + nettoyage)**"
+DEFAULT_TITLE = "📡 **BotJanus RC (licences + nettoyage + détecteur IA)**"
 DISCORD_MAX = 2000          # limite de caractères d'un message Discord
 FENCE_OVERHEAD = 8          # "```\n" + "\n```"
 _STOP = object()
@@ -40,7 +49,7 @@ _STOP = object()
 
 class DiscordWebhookHandler(logging.Handler):
     def __init__(self, url, title=DEFAULT_TITLE, username=None,
-                 batch_seconds=2.0, level=logging.INFO):
+                 batch_seconds=2.0, level=logging.INFO, headers=None):
         super().__init__(level)
         self.url = url
         self.title = title
@@ -48,6 +57,8 @@ class DiscordWebhookHandler(logging.Handler):
         self.batch_seconds = batch_seconds
         self._queue = queue.Queue(maxsize=5000)
         self._session = requests.Session()
+        if headers:
+            self._session.headers.update(headers)
         self._dropped = 0
         self._thread = threading.Thread(
             target=self._worker, name="discord_logger", daemon=True)
@@ -146,21 +157,49 @@ class DiscordWebhookHandler(logging.Handler):
         # abandon silencieux : on ne logge pas ici pour éviter une boucle
 
 
+def _load_env_file():
+    """Charge un fichier KEY=VALUE (sans écraser l'environnement existant)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [os.environ.get("DISCORD_ENV_FILE"),
+                  os.path.join(here, "env", "rc-images.env"),
+                  os.path.join(here, ".env")]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+            return path
+    return None
+
+
 def install(url=None, logger=None):
     """Branche le handler sur le logger racine (tous les bots) et le renvoie.
-    Ne fait rien si aucune URL de webhook n'est configurée."""
+    Ne fait rien si ni compte bot ni webhook ne sont configurés."""
+    _load_env_file()
+    token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+    channel_id = os.environ.get("DISCORD_LOG_CHANNEL_ID", "").strip()
+    headers = None
+    if token and channel_id and not url:
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        headers = {"Authorization": f"Bot {token}",
+                   "User-Agent": "DiscordBot (BotJanus-RC-images, 1.0)"}
     url = url or os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
     if not url:
         logging.getLogger("discord_logger").warning(
-            "DISCORD_WEBHOOK_URL absent : logs Discord désactivés.")
+            "Ni DISCORD_BOT_TOKEN+DISCORD_LOG_CHANNEL_ID ni DISCORD_WEBHOOK_URL : logs Discord désactivés.")
         return None
     level = getattr(logging, os.environ.get("DISCORD_LOG_LEVEL", "INFO").upper(), logging.INFO)
     handler = DiscordWebhookHandler(
         url,
         title=os.environ.get("DISCORD_LOG_TITLE", DEFAULT_TITLE),
-        username=os.environ.get("DISCORD_LOG_USERNAME") or None,
+        username=None if headers else (os.environ.get("DISCORD_LOG_USERNAME") or None),
         batch_seconds=float(os.environ.get("DISCORD_LOG_BATCH", "2")),
         level=level,
+        headers=headers,
     )
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     (logger or logging.getLogger()).addHandler(handler)
