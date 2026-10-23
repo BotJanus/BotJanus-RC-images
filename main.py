@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("launcher")
 
-# Envoie chaque log vers le webhook Discord (variable DISCORD_WEBHOOK_URL).
+# Envoie chaque log vers le webhook Discord (DISCORD_BOT_TOKEN + DISCORD_LOG_CHANNEL_ID, voir env/agent.env).
 import discord_logger
 discord_logger.install()
 
