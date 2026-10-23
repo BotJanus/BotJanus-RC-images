@@ -41,7 +41,7 @@ import time
 
 import requests
 
-DEFAULT_TITLE = "📡 **BotJanus RC (licences + nettoyage + détecteur IA)**"
+DEFAULT_TITLE = "📡 **BotJanus RC (licences + nettoyage)**"
 DISCORD_MAX = 2000          # limite de caractères d'un message Discord
 FENCE_OVERHEAD = 8          # "```\n" + "\n```"
 _STOP = object()
