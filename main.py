@@ -47,6 +47,7 @@ def run_bot(name, entry_point):
 
 
 def main():
+    discord_logger.announce_started()   # embed « démarré / redémarré » : posté AVANT les logs
     threads = [
         threading.Thread(
             target=run_bot,
@@ -67,11 +68,10 @@ def main():
         time.sleep(2)  # Décalage pour éviter des requêtes simultanées lors du login
 
     log.info("Les 3 bots tournent en parallèle. Appuie sur Ctrl+C pour tout arrêter.")
-    discord_logger.announce_started()   # embed « démarré / redémarré » (ordre du dashboard)
 
     def _on_sigterm(signum, frame):     # arrêt demandé par l'agent
+        discord_logger.announce_stopping()   # embed « arrêté » : posté AVANT les logs d'arrêt
         log.info("Arrêt demandé (SIGTERM). Fin du launcher.")
-        discord_logger.announce_stopping()   # embed « arrêté »
         logging.shutdown()                   # vide la file Discord avant de quitter
         sys.exit(0)
 
