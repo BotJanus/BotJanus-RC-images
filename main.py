@@ -10,6 +10,7 @@ Usage :
     (Ctrl+C pour arrêter l'ensemble)
 """
 
+import signal
 import sys
 import time
 import logging
@@ -66,6 +67,15 @@ def main():
         time.sleep(2)  # Décalage pour éviter des requêtes simultanées lors du login
 
     log.info("Les 3 bots tournent en parallèle. Appuie sur Ctrl+C pour tout arrêter.")
+    discord_logger.announce_started()   # embed « démarré / redémarré » (ordre du dashboard)
+
+    def _on_sigterm(signum, frame):     # arrêt demandé par l'agent
+        log.info("Arrêt demandé (SIGTERM). Fin du launcher.")
+        discord_logger.announce_stopping()   # embed « arrêté »
+        logging.shutdown()                   # vide la file Discord avant de quitter
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     try:
         while True:

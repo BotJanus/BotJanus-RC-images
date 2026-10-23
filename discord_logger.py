@@ -33,6 +33,7 @@ Variables :
 """
 
 import atexit
+import json
 import logging
 import os
 import queue
@@ -40,8 +41,9 @@ import threading
 import time
 
 import requests
+from datetime import datetime, timezone
 
-DEFAULT_TITLE = "📡 **BotJanus RC (licences + nettoyage)**"
+DEFAULT_TITLE = "📡 **BotJanus RC (licences + nettoyage + détecteur IA)**"
 DISCORD_MAX = 2000          # limite de caractères d'un message Discord
 FENCE_OVERHEAD = 8          # "```\n" + "\n```"
 _STOP = object()
@@ -91,6 +93,10 @@ class DiscordWebhookHandler(logging.Handler):
             item = self._queue.get()
             if item is _STOP:
                 break
+            if isinstance(item, dict):               # embed : envoi immédiat
+                self._post_payload({"embeds": [item], "allowed_mentions": {"parse": []}})
+                continue
+            pending_embed = None
             lines = [item]
             deadline = time.monotonic() + self.batch_seconds
             while True:  # regroupe les logs arrivant dans la fenêtre
@@ -104,12 +110,17 @@ class DiscordWebhookHandler(logging.Handler):
                 if nxt is _STOP:
                     stop = True
                     break
+                if isinstance(nxt, dict):            # embed : on poste d'abord les logs, puis lui
+                    pending_embed = nxt
+                    break
                 lines.append(nxt)
             if self._dropped:
                 lines.append(f"[discord_logger] {self._dropped} log(s) ignoré(s) (file pleine)")
                 self._dropped = 0
             for message in self._build_messages(lines):
                 self._post(message)
+            if pending_embed is not None:
+                self._post_payload({"embeds": [pending_embed], "allowed_mentions": {"parse": []}})
 
     def _build_messages(self, lines):
         """Découpe en messages <= 2000 caractères : titre + bloc de code."""
@@ -133,8 +144,17 @@ class DiscordWebhookHandler(logging.Handler):
             chunks.append(current)
         return [f"{self.title}\n```\n" + "\n".join(c) + "\n```" for c in chunks]
 
+    def send_embed(self, embed):
+        """Met un embed en file (partira après les logs déjà en attente)."""
+        try:
+            self._queue.put_nowait(embed)
+        except queue.Full:
+            pass
+
     def _post(self, content):
-        payload = {"content": content, "allowed_mentions": {"parse": []}}
+        self._post_payload({"content": content, "allowed_mentions": {"parse": []}})
+
+    def _post_payload(self, payload):
         if self.username:
             payload["username"] = self.username
         for _ in range(5):
@@ -155,6 +175,75 @@ class DiscordWebhookHandler(logging.Handler):
                 continue
             return                                  # succès ou erreur 4xx définitive
         # abandon silencieux : on ne logge pas ici pour éviter une boucle
+
+
+# --- Annonces démarrage / arrêt / redémarrage (comme l'embed du dashboard) ---------------
+# L'agent écrit BOTJANUS_ACTION_FILE ({"action","who","at"}) avant chaque ordre du dashboard.
+_STYLE = {  # action -> (couleur, titre, texte)
+    "start":   (0x2ECC71, "🟢 Script démarré",   "démarré"),
+    "restart": (0x3498DB, "🔄 Script redémarré", "relancé"),
+    "stop":    (0xE74C3C, "🔴 Script arrêté",    "arrêté"),
+}
+_handler = None
+
+
+def _read_action(consume=True):
+    path = os.environ.get("BOTJANUS_ACTION_FILE")
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if consume and data.get("action") != "restart":    # le redémarrage est annoncé au démarrage
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return data
+
+
+def _announce(data):
+    if not _handler or not data or data.get("action") not in _STYLE:
+        return
+    color, title, result = _STYLE[data["action"]]
+    sid = os.environ.get("BOTJANUS_SERVICE_ID", "rc-images")
+    label = os.environ.get("BOTJANUS_SERVICE_LABEL", sid)
+    at = float(data.get("at") or time.time())
+    embed = {
+        "title": title,
+        "description": f"**{label}**\n> {result}",
+        "color": color,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "fields": [
+            {"name": "Script", "value": f"`agent-{sid}`", "inline": True},
+            {"name": "Demandé par", "value": str(data.get("who") or "—"), "inline": True},
+            {"name": "Traité en", "value": f"{max(0, round(time.time() - at))}s", "inline": True},
+        ],
+        "footer": {"text": "BotJanus • Scripts continus"},
+    }
+    _handler.send_embed(embed)
+
+
+def announce_started():
+    """À appeler quand les bots sont lancés : annonce « démarré » ou « redémarré »
+    si l'ordre vient du dashboard (rien si l'agent a relancé tout seul)."""
+    data = _read_action()
+    if data and data.get("action") in ("start", "restart"):
+        _announce(data)
+        if data.get("action") == "restart":
+            try:
+                os.remove(os.environ["BOTJANUS_ACTION_FILE"])
+            except Exception:
+                pass
+
+
+def announce_stopping():
+    """À appeler à la réception de SIGTERM : annonce « arrêté » (pas pour un redémarrage)."""
+    data = _read_action()
+    if data and data.get("action") == "stop":
+        _announce(data)
 
 
 def _load_env_file():
@@ -203,4 +292,6 @@ def install(url=None, logger=None):
     )
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     (logger or logging.getLogger()).addHandler(handler)
+    global _handler
+    _handler = handler
     return handler
