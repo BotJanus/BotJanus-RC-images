@@ -30,6 +30,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("launcher")
 
+# Envoie chaque log vers le webhook Discord (variable DISCORD_WEBHOOK_URL).
+import discord_logger
+discord_logger.install()
+
 
 def run_bot(name, entry_point):
     """Encapsule main() de chaque bot pour logger proprement les erreurs sans
