@@ -1,0 +1,6 @@
+requests>=2.31
+Pillow>=10.0
+ExifRead>=3.0
+c2pa-python>=0.10
+pywikibot
+openai>=1.0
