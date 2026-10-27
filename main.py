@@ -85,7 +85,7 @@ def main():
 
     try:
         while True:
-            time.sleep (3600)
+            time.sleep(3600)
     except KeyboardInterrupt:
         log.info("Arrêt demandé (Ctrl+C). Fin du launcher.")
         sys.exit(0)
