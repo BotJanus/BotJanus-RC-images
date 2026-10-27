@@ -19,7 +19,7 @@ import threading
 import pywikibot
 import license_bot
 import image_cleanup_bot
-import archives.ai_detector as ai_detector
+import ai_detector
 
 # Initialisation de la session Pywikibot globale
 site = pywikibot.Site("fr", "vikidia")
@@ -61,6 +61,12 @@ def main():
             name="image_cleanup_bot",
             daemon=True,
         ),
+        threading.Thread(
+            target=run_bot,
+            args=("ai_detector", ai_detector.main),
+            name="ai_detector",
+            daemon=True,
+        ),
     ]
 
     for t in threads:
@@ -79,7 +85,7 @@ def main():
 
     try:
         while True:
-            time.sleep(3600)
+            time.sleep(600)
     except KeyboardInterrupt:
         log.info("Arrêt demandé (Ctrl+C). Fin du launcher.")
         sys.exit(0)
