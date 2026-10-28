@@ -48,7 +48,7 @@ FAMILY = "vikidia"          # nécessite une family file "vikidia" pour pywikibo
 FILE_NAMESPACE = 6          # "Fichier" sur Vikidia FR
 ARTICLE_NAMESPACES = [0]    # namespace des articles (0 = principal)
 
-POLL_INTERVAL = 600          # secondes entre chaque vérification des RC
+POLL_INTERVAL = bot_state.POLL_INTERVAL  # secondes entre chaque vérification des RC
 DRY_RUN = False              # True = simulation, ne sauvegarde rien
 EDIT_SUMMARY = "Bot : suppression du lien vers une image supprimée"
 SLEEP_BETWEEN_EDITS = 2     # secondes, pour ne pas spammer l'API
@@ -202,48 +202,49 @@ def process_deleted_file(site: pywikibot.site.APISite, file_title: str):
 # BOUCLE PRINCIPALE
 # ---------------------------------------------------------------------------
 
+_already_processed = set()
+
+
+def run_cycle(site, since):
+    """Un passage : nettoie les images supprimées depuis `since`.
+    Renvoie True si le journal a pu être lu."""
+    try:
+        deleted_files = get_recent_file_deletions(site, since=since)
+    except Exception as e:
+        log.error("Erreur lors de la lecture du journal de suppression : %s", e)
+        return False
+
+    for file_title in deleted_files:
+        if file_title in _already_processed:
+            continue
+        try:
+            process_deleted_file(site, file_title)
+        except Exception as e:
+            log.error("Erreur inattendue sur %s : %s", file_title, e)
+            continue
+        _already_processed.add(file_title)
+
+    if len(_already_processed) > 5000:
+        _already_processed.clear()
+    return True
+
+
 def main():
+    """Mode autonome (hors main.py) : même cycle de 10 min, état partagé."""
     site = pywikibot.Site(LANG, FAMILY)
     site.login()
-
     log.info("Bot démarré sur %s (DRY_RUN=%s)", site, DRY_RUN)
 
-    already_processed = set()
-    shared_last_check = bot_state.load_last_check()
-
-    if shared_last_check is not None:
-        last_check = shared_last_check
-        log.info("Reprise depuis le dernier passage partagé (%s) : rattrapage des"
-                  " suppressions survenues pendant l'arrêt, puis retour au direct.",
-                  last_check.isoformat())
-    else:
-        last_check = datetime.now(timezone.utc)
-        log.info("Aucun état partagé (premier lancement). Surveillance des"
-                  " suppressions à partir de maintenant : %s", last_check.isoformat())
-
+    since = bot_state.load_last_check() or pywikibot.Timestamp.now()
     while True:
+        start = pywikibot.Timestamp.now()
         try:
-            now = datetime.now(timezone.utc)
-            deleted_files = get_recent_file_deletions(site, since=last_check)
-
-            for file_title in deleted_files:
-                if file_title in already_processed:
-                    continue
-                process_deleted_file(site, file_title)
-                already_processed.add(file_title)
-
-            # Garder le set raisonnable en mémoire
-            if len(already_processed) > 5000:
-                already_processed.clear()
-
-            last_check = now - timedelta(minutes=1)  # petite marge de sécurité
-            bot_state.update_last_check(last_check)
+            if run_cycle(site, since):
+                since = bot_state.next_since(start)
+                bot_state.update_last_check(since)
         except KeyboardInterrupt:
             log.info("Arrêt demandé par l'utilisateur.")
             sys.exit(0)
-        except Exception as e:
-            log.error("Erreur dans la boucle principale : %s", e)
-
         time.sleep(POLL_INTERVAL)
 
 

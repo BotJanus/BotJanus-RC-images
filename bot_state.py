@@ -24,6 +24,10 @@ import pywikibot
 
 STATE_FILE = "bot_state.txt"
 
+# Cycle commun aux 3 bots : un seul passage toutes les 10 minutes.
+POLL_INTERVAL = 600          # secondes
+OVERLAP_MARGIN = 60          # secondes de chevauchement entre deux fenêtres (les doublons sont filtrés par logid)
+
 _lock = threading.Lock()
 
 
@@ -50,3 +54,9 @@ def update_last_check(ts=None):
         with open(STATE_FILE, "w") as f:
             f.write(ts.isoformat())
     return ts
+
+
+def next_since(cycle_start):
+    """Borne de début de la prochaine fenêtre : début du cycle - marge."""
+    from datetime import timedelta
+    return cycle_start - timedelta(seconds=OVERLAP_MARGIN)

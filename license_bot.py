@@ -32,7 +32,7 @@ import bot_state
 # ==========================================================================
 
 DRY_RUN = False               # True = simulation, aucune écriture sur le wiki
-POLL_INTERVAL = 600            # secondes entre deux sondages du journal des téléversements
+POLL_INTERVAL = bot_state.POLL_INTERVAL            # secondes entre deux sondages du journal des téléversements
 PROCESS_BACKLOG = False       # False = ne traite que les téléversements à partir du démarrage
                                # True = traite aussi les téléversements déjà existants (attention,
                                # peut représenter énormément de pages au premier lancement),
@@ -173,71 +173,57 @@ def fetch_new_uploads(site, since_timestamp):
     return list(site.logevents(logtype="upload", start=since_timestamp, reverse=True))
 
 
-def watch_uploads(site, known_license_templates, dry_run):
-    shared_last_check = bot_state.load_last_check()
+_seen_logids = set()
 
-    if shared_last_check is not None:
-        # Le bot (ou un des 2 autres) a déjà tourné : on rattrape tout ce qui
-        # s'est passé pendant la coupure, en repartant de la dernière heure
-        # de passage partagée entre les 3 bots.
-        last_timestamp = shared_last_check
-        last_logid = None
-        log.info("Reprise depuis le dernier passage partagé (%s UTC) : rattrapage des"
-                  " téléversements manqués pendant l'arrêt, puis retour au direct.",
-                  last_timestamp.isoformat())
-    elif PROCESS_BACKLOG:
-        # None = pas de borne de début -> tout l'historique des téléversements existants
-        last_timestamp = None
-        last_logid = None
-        log.info("Aucun état partagé (premier lancement). PROCESS_BACKLOG=True :"
-                  " traitement de tout l'historique.")
-    else:
-        last_timestamp = pywikibot.Timestamp.now()
-        last_logid = None
-        log.info("Aucun état partagé (premier lancement). Surveillance à partir de"
-                  " maintenant (%s UTC).", last_timestamp.isoformat())
 
-    log.info("Bot démarré, sondage toutes les %d secondes.", POLL_INTERVAL)
+def run_cycle(site, since, known_license_templates, dry_run=DRY_RUN):
+    """Un passage : traite les téléversements depuis `since`.
+    Renvoie True si le journal a pu être lu (le cycle compte comme réussi)."""
+    try:
+        events = fetch_new_uploads(site, since)
+    except Exception as e:
+        log.error("Erreur lors du sondage du journal des téléversements : %s", e)
+        return False
 
-    while True:
+    for event in events:
         try:
-            events = fetch_new_uploads(site, last_timestamp)
-        except Exception as e:
-            log.error("Erreur lors du sondage du journal des téléversements : %s", e)
-            time.sleep(POLL_INTERVAL)
+            logid = event.logid()
+        except Exception:
+            logid = None
+
+        # La fenêtre se chevauche : on ignore les événements déjà traités.
+        if logid is not None and logid in _seen_logids:
             continue
 
-        for event in events:
-            try:
-                logid = event.logid()
-            except Exception:
-                logid = None
+        try:
+            page = event.page()
+        except Exception as e:
+            log.warning("Impossible de récupérer la page associée à l'événement : %s", e)
+            continue
 
-            ts = event.timestamp()
+        try:
+            process_file(site, page, known_license_templates, dry_run=dry_run)
+        except Exception as e:
+            log.error("Erreur inattendue lors du traitement de %s : %s", page.title(), e)
 
-            # Évite de retraiter le tout dernier événement déjà vu au sondage précédent
-            # (la fenêtre 'start' est inclusive).
-            if last_logid is not None and logid == last_logid:
-                continue
+        if logid is not None:
+            _seen_logids.add(logid)
 
-            try:
-                page = event.page()
-            except Exception as e:
-                log.warning("Impossible de récupérer la page associée à l'événement : %s", e)
-                continue
+    if len(_seen_logids) > 5000:
+        _seen_logids.clear()
+    return True
 
-            try:
-                process_file(site, page, known_license_templates, dry_run=dry_run)
-            except Exception as e:
-                log.error("Erreur inattendue lors du traitement de %s : %s", page.title(), e)
 
-            last_timestamp = ts
-            last_logid = logid
-
-        # Fin du cycle de sondage : on met à jour l'heure de dernier passage
-        # partagée avec les 2 autres bots.
-        bot_state.update_last_check(pywikibot.Timestamp.now())
-
+def watch_uploads(site, known_license_templates, dry_run):
+    """Mode autonome (hors main.py) : même cycle de 10 min, état partagé."""
+    since = bot_state.load_last_check() or pywikibot.Timestamp.now()
+    log.info("Bot démarré, sondage toutes les %d secondes (depuis %s UTC).",
+             POLL_INTERVAL, since.isoformat())
+    while True:
+        start = pywikibot.Timestamp.now()
+        if run_cycle(site, since, known_license_templates, dry_run):
+            since = bot_state.next_since(start)
+            bot_state.update_last_check(since)
         time.sleep(POLL_INTERVAL)
 
 
