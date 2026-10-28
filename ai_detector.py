@@ -123,7 +123,7 @@ def build_ai_tag(ai_score):
     return TAG_TEMPLATE_PERCENT % int(round(ai_score))
 EDIT_SUMMARY_AI = "Bot : ajout du bandeau Image IA (détection automatique : %s)"
 EDIT_SUMMARY_MODERATION = "Bot : signalement d'un contenu potentiellement inapproprié (%s)"
-POLL_INTERVAL = int(_float_env("AI_POLL_INTERVAL", 3600))   # secondes
+POLL_INTERVAL = int(_float_env("AI_POLL_INTERVAL", 600))   # secondes
 HTTP_TIMEOUT = 20
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 USER_AGENT = "BotJanus-ai-detector/2.0 (Vikidia bot)"
