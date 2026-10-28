@@ -747,8 +747,8 @@ def watch_uploads_for_ai(site, dry_run=False):
                 _save_ai_state(last_timestamp)
         except Exception as e:
             log.error("Erreur dans la boucle de surveillance IA : %s", e)
-        log.info("Sondage terminé : %d téléversement(s) examiné(s). Prochain passage dans %d s.",
-                 count, POLL_INTERVAL)
+        if count:   # silence quand il ne s'est rien passé
+            log.info("Sondage terminé : %d téléversement(s) examiné(s).", count)
         time.sleep(POLL_INTERVAL)
 
 
