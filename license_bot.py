@@ -216,11 +216,11 @@ def run_cycle(site, since, known_license_templates, dry_run=DRY_RUN):
 
 def watch_uploads(site, known_license_templates, dry_run):
     """Mode autonome (hors main.py) : même cycle de 10 min, état partagé."""
-    since = bot_state.load_last_check() or pywikibot.Timestamp.now()
+    since = bot_state.load_last_check() or pywikibot.Timestamp.utcnow()
     log.info("Bot démarré, sondage toutes les %d secondes (depuis %s UTC).",
              POLL_INTERVAL, since.isoformat())
     while True:
-        start = pywikibot.Timestamp.now()
+        start = pywikibot.Timestamp.utcnow()
         if run_cycle(site, since, known_license_templates, dry_run):
             since = bot_state.next_since(start)
             bot_state.update_last_check(since)

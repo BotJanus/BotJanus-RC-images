@@ -63,13 +63,13 @@ def main():
     signal.signal(signal.SIGTERM, _on_sigterm)
 
     # Reprise depuis le dernier passage partagé, sinon "maintenant".
-    since = bot_state.load_last_check() or pywikibot.Timestamp.now()
+    since = bot_state.load_last_check() or pywikibot.Timestamp.utcnow()
     log.info("Cycle commun toutes les %d s, première fenêtre depuis %s UTC.",
              bot_state.POLL_INTERVAL, since.isoformat())
 
     try:
         while True:
-            start = pywikibot.Timestamp.now()
+            start = pywikibot.Timestamp.utcnow()
 
             steps = [
                 ("license_bot", lambda: license_bot.run_cycle(site, since, known_licenses)),
@@ -90,7 +90,7 @@ def main():
                 log.warning("Cycle incomplet %s : fenêtre conservée.", results)
 
             # Un cycle toutes les 10 minutes, durée d'exécution comprise.
-            elapsed = (pywikibot.Timestamp.now() - start).total_seconds()
+            elapsed = (pywikibot.Timestamp.utcnow() - start).total_seconds()
             time.sleep(max(1, bot_state.POLL_INTERVAL - elapsed))
     except KeyboardInterrupt:
         log.info("Arrêt demandé (Ctrl+C). Fin du launcher.")

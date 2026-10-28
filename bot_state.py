@@ -49,7 +49,7 @@ def update_last_check(ts=None):
     des 3 bots. N'échoue jamais bruyamment : une erreur d'écriture est juste
     loguée par l'appelant si besoin, elle n'arrête pas le bot."""
     if ts is None:
-        ts = pywikibot.Timestamp.now()
+        ts = pywikibot.Timestamp.utcnow()
     with _lock:
         with open(STATE_FILE, "w") as f:
             f.write(ts.isoformat())
