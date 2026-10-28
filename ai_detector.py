@@ -727,11 +727,11 @@ def run_cycle(site, since, dry_run=False):
 
 def watch_uploads_for_ai(site, dry_run=False):
     """Mode autonome (hors main.py) : même cycle de 10 min, état partagé."""
-    since = bot_state.load_last_check() or pywikibot.Timestamp.now()
+    since = bot_state.load_last_check() or pywikibot.Timestamp.utcnow()
     log.info("Sondage du journal des téléversements toutes les %d s (depuis %s UTC).",
              POLL_INTERVAL, since.isoformat())
     while True:
-        start = pywikibot.Timestamp.now()
+        start = pywikibot.Timestamp.utcnow()
         if run_cycle(site, since, dry_run=dry_run):
             since = bot_state.next_since(start)
             try:
