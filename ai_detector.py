@@ -589,7 +589,7 @@ def send_discord_embed(title, description, color, fields=None, thumbnail_url=Non
     embed = {
         "title": title[:256], "description": description[:4000], "color": color,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "footer": {"text": "ai_detector · pipeline 3 étapes"},
+        "footer": {"text": "ai_detector"},
     }
     if fields:
         embed["fields"] = [{"name": n, "value": str(v)[:1000], "inline": i} for n, v, i in fields]
