@@ -235,9 +235,9 @@ def main():
     site.login()
     log.info("Bot démarré sur %s (DRY_RUN=%s)", site, DRY_RUN)
 
-    since = bot_state.load_last_check() or pywikibot.Timestamp.now()
+    since = bot_state.load_last_check() or pywikibot.Timestamp.utcnow()
     while True:
-        start = pywikibot.Timestamp.now()
+        start = pywikibot.Timestamp.utcnow()
         try:
             if run_cycle(site, since):
                 since = bot_state.next_since(start)
