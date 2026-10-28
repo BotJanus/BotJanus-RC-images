@@ -690,42 +690,24 @@ def process_file_page(site, page_title, dry_run=False):
                            "**%s**\n```%s```" % (page_title, str(e)[:500]), EMBED_COLOR_ERROR)
 
 
-AI_STATE_FILE = "ai_detector_state.txt"     # état PROPRE à ce détecteur (voir note ci-dessous)
-
-
-def _load_ai_state():
-    try:
-        with open(AI_STATE_FILE, "r") as f:
-            return pywikibot.Timestamp.fromISOformat(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        return None
-
-
-def _save_ai_state(ts):
-    try:
-        with open(AI_STATE_FILE, "w") as f:
-            f.write(ts.isoformat())
-    except OSError as e:
-        log.warning("Impossible d'écrire %s : %s", AI_STATE_FILE, e)
-
-
 def watch_uploads_for_ai(site, dry_run=False):
     """Sonde le journal des téléversements.
 
-    On n'utilise PAS l'heure partagée bot_state.txt : les deux autres bots la font
-    avancer à chaque cycle, ce qui faisait « sauter » à ce détecteur les fichiers
-    téléversés entre deux de ses passages. Il garde donc son propre curseur
-    (ai_detector_state.txt), mis à jour uniquement après traitement.
+    Utilise l'heure de dernier passage partagée (bot_state.txt) avec license_bot
+    et image_cleanup_bot, comme les deux autres bots.
     """
-    last_timestamp = _load_ai_state()
-    if last_timestamp is not None:
-        log.info("Reprise depuis le dernier téléversement traité (%s UTC).", last_timestamp.isoformat())
+    shared_last_check = bot_state.load_last_check()
+    last_logid = None
+
+    if shared_last_check is not None:
+        last_timestamp = shared_last_check
+        log.info("Reprise depuis le dernier passage partagé (%s UTC) : rattrapage des"
+                 " téléversements manqués pendant l'arrêt, puis retour au direct.",
+                 last_timestamp.isoformat())
     else:
         last_timestamp = pywikibot.Timestamp.now()
-        _save_ai_state(last_timestamp)
-        log.info("Premier lancement : surveillance à partir de maintenant (%s UTC).",
-                 last_timestamp.isoformat())
-    last_logid = None
+        log.info("Aucun état partagé (premier lancement). Surveillance à partir de"
+                 " maintenant (%s UTC).", last_timestamp.isoformat())
     log.info("Sondage du journal des téléversements toutes les %d s.", POLL_INTERVAL)
 
     while True:
@@ -744,11 +726,17 @@ def watch_uploads_for_ai(site, dry_run=False):
                 except Exception as e:
                     log.error("Erreur sur l'événement de téléversement : %s", e)
                 last_timestamp, last_logid = event.timestamp(), logid
-                _save_ai_state(last_timestamp)
         except Exception as e:
             log.error("Erreur dans la boucle de surveillance IA : %s", e)
         if count:   # silence quand il ne s'est rien passé
             log.info("Sondage terminé : %d téléversement(s) examiné(s).", count)
+
+        # Fin du cycle de sondage : mise à jour de l'heure partagée avec les 2 autres bots.
+        try:
+            bot_state.update_last_check(pywikibot.Timestamp.now())
+        except OSError as e:
+            log.warning("Impossible d'écrire l'état partagé : %s", e)
+
         time.sleep(POLL_INTERVAL)
 
 
