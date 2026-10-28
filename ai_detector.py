@@ -27,7 +27,8 @@ Variables d'environnement (ou fichier .env / env/agent.env) :
                               (vide par défaut = alerte Discord uniquement, aucune écriture)
     MODERATE_ALWAYS           "1" = modérer même si l'étape 1/2 conclut déjà à de l'IA
                               (1 appel SightEngine supplémentaire ; défaut : 0)
-    AI_DETECTOR_WEBHOOK_URL   webhook Discord dédié (facultatif)
+    (les embeds Discord passent par discord_logger : DISCORD_BOT_TOKEN + DISCORD_LOG_CHANNEL_ID,
+     plus de webhook dédié)
 """
 
 import argparse
@@ -42,6 +43,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import requests
+
+import discord_logger
 
 try:                                    # pywikibot n'est requis que pour le mode wiki
     import pywikibot
@@ -109,15 +112,22 @@ MODERATION_THRESHOLD = _float_env("MODERATION_THRESHOLD", 80.0)    # en %
 MODERATION_TEMPLATE = os.getenv("MODERATION_TEMPLATE", "").strip()
 MODERATE_ALWAYS = os.getenv("MODERATE_ALWAYS", "0").strip().lower() in ("1", "true", "oui", "yes")
 
-TAG_TEMPLATE = "{{image IA}}\n"
-EDIT_SUMMARY_AI = "Bot : ajout de {{image IA}} (détection automatique : %s)"
+TAG_TEMPLATE = "{{SI|Image IA|BotJanus}}\n"             # sans pourcentage connu
+TAG_TEMPLATE_PERCENT = "{{SI|Image IA (%s%%)|BotJanus}}\n"  # avec le score SightEngine
+
+
+def build_ai_tag(ai_score):
+    """Bandeau à placer en haut de la page : pourcentage inclus s'il y en a un."""
+    if ai_score is None:
+        return TAG_TEMPLATE
+    return TAG_TEMPLATE_PERCENT % int(round(ai_score))
+EDIT_SUMMARY_AI = "Bot : ajout du bandeau Image IA (détection automatique : %s)"
 EDIT_SUMMARY_MODERATION = "Bot : signalement d'un contenu potentiellement inapproprié (%s)"
 POLL_INTERVAL = int(_float_env("AI_POLL_INTERVAL", 60))   # secondes
 HTTP_TIMEOUT = 20
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 USER_AGENT = "BotJanus-ai-detector/2.0 (Vikidia bot)"
 
-AI_DETECTOR_WEBHOOK_URL = os.getenv("AI_DETECTOR_WEBHOOK_URL", "").strip()
 EMBED_COLOR_AI_DETECTED = 0xE74C3C
 EMBED_COLOR_CLEAN = 0x2ECC71
 EMBED_COLOR_SKIP = 0x95A5A6
@@ -575,9 +585,7 @@ def detect_ai_image(image_bytes, image_url=""):
 # ==========================================================================
 
 def send_discord_embed(title, description, color, fields=None, thumbnail_url=None):
-    """Envoie un embed via webhook. Ne lève jamais."""
-    if not AI_DETECTOR_WEBHOOK_URL:
-        return
+    """Envoie un embed via discord_logger (pas de webhook dédié). Ne lève jamais."""
     embed = {
         "title": title[:256], "description": description[:4000], "color": color,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -588,11 +596,10 @@ def send_discord_embed(title, description, color, fields=None, thumbnail_url=Non
     if thumbnail_url:
         embed["thumbnail"] = {"url": thumbnail_url}
     try:
-        r = requests.post(AI_DETECTOR_WEBHOOK_URL, json={"embeds": [embed]}, timeout=10)
-        if r.status_code >= 300:
-            log.warning("Webhook Discord : réponse %s : %s", r.status_code, r.text[:200])
-    except requests.exceptions.RequestException as e:
-        log.warning("Webhook Discord : envoi impossible : %s", e)
+        if not discord_logger.send_embed(embed):
+            log.debug("discord_logger non installé : embed non envoyé.")
+    except Exception as e:
+        log.warning("Embed Discord : envoi impossible : %s", e)
 
 
 # ==========================================================================
@@ -604,6 +611,11 @@ def _has_template(text, name):
                      text, re.I) is not None
 
 
+def _has_ai_si_banner(text):
+    """Détecte {{SI|Image IA ...}} (avec ou sans pourcentage)."""
+    return re.search(r"\{\{\s*SI\s*\|\s*Image[ _]IA", text, re.I) is not None
+
+
 def process_file_page(site, page_title, dry_run=False):
     try:
         file_page = pywikibot.FilePage(site, page_title)
@@ -611,7 +623,7 @@ def process_file_page(site, page_title, dry_run=False):
             log.error("La page %s n'existe pas.", page_title)
             return
         text = file_page.text
-        already_ai = _has_template(text, "image IA")
+        already_ai = _has_template(text, "image IA") or _has_ai_si_banner(text)
         mod_name = MODERATION_TEMPLATE.strip("{}").split("|")[0] if MODERATION_TEMPLATE else ""
         already_mod = bool(mod_name) and _has_template(text, mod_name)
 
@@ -643,7 +655,7 @@ def process_file_page(site, page_title, dry_run=False):
             fields.append(("Preuves", "\n".join(res.evidence)[:900], False))
 
         if res.is_ai and not already_ai:
-            new_text = TAG_TEMPLATE + new_text
+            new_text = build_ai_tag(res.ai_score) + new_text
             summaries.append(EDIT_SUMMARY_AI % res.source)
 
         mod = res.moderation
@@ -759,6 +771,8 @@ def main():
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
                             stream=sys.stdout)
+    if discord_logger._handler is None:      # lancement autonome (hors main.py)
+        discord_logger.install()
     _log_config()
 
     if args.local_path:

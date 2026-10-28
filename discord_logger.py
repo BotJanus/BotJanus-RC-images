@@ -226,6 +226,15 @@ def _announce(data):
     _handler.send_embed(embed)
 
 
+def send_embed(embed):
+    """Envoie un embed via le logger Discord (compte bot ou webhook déjà configuré).
+    Retourne False si le logger n'est pas installé. Ne lève jamais."""
+    if _handler is None:
+        return False
+    _handler.send_embed(embed)
+    return True
+
+
 def announce_started():
     """À appeler quand les bots sont lancés : annonce « démarré » ou « redémarré »
     si l'ordre vient du dashboard (rien si l'agent a relancé tout seul)."""
