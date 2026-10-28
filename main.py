@@ -19,7 +19,7 @@ import threading
 import pywikibot
 import license_bot
 import image_cleanup_bot
-import archives.ai_detector as ai_detector
+import ai_detector
 
 # Initialisation de la session Pywikibot globale
 site = pywikibot.Site("fr", "vikidia")
@@ -59,6 +59,12 @@ def main():
             target=run_bot,
             args=("image_cleanup_bot", image_cleanup_bot.main),
             name="image_cleanup_bot",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=run_bot,
+            args=("ai_detector", ai_detector.main),
+            name="ai_detector",
             daemon=True,
         ),
     ]
