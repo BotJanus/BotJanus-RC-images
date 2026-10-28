@@ -123,7 +123,7 @@ def build_ai_tag(ai_score):
     return TAG_TEMPLATE_PERCENT % int(round(ai_score))
 EDIT_SUMMARY_AI = "Bot : ajout du bandeau Image IA (détection automatique : %s)"
 EDIT_SUMMARY_MODERATION = "Bot : signalement d'un contenu potentiellement inapproprié (%s)"
-POLL_INTERVAL = int(_float_env("AI_POLL_INTERVAL", 600))   # secondes
+POLL_INTERVAL = bot_state.POLL_INTERVAL if bot_state else 600   # secondes (cycle commun, 10 min)
 HTTP_TIMEOUT = 20
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 USER_AGENT = "BotJanus-ai-detector/2.0 (Vikidia bot)"
@@ -690,53 +690,54 @@ def process_file_page(site, page_title, dry_run=False):
                            "**%s**\n```%s```" % (page_title, str(e)[:500]), EMBED_COLOR_ERROR)
 
 
-def watch_uploads_for_ai(site, dry_run=False):
-    """Sonde le journal des téléversements.
+_seen_logids = set()
 
-    Utilise l'heure de dernier passage partagée (bot_state.txt) avec license_bot
-    et image_cleanup_bot, comme les deux autres bots.
-    """
-    shared_last_check = bot_state.load_last_check()
-    last_logid = None
 
-    if shared_last_check is not None:
-        last_timestamp = shared_last_check
-        log.info("Reprise depuis le dernier passage partagé (%s UTC) : rattrapage des"
-                 " téléversements manqués pendant l'arrêt, puis retour au direct.",
-                 last_timestamp.isoformat())
-    else:
-        last_timestamp = pywikibot.Timestamp.now()
-        log.info("Aucun état partagé (premier lancement). Surveillance à partir de"
-                 " maintenant (%s UTC).", last_timestamp.isoformat())
-    log.info("Sondage du journal des téléversements toutes les %d s.", POLL_INTERVAL)
+def run_cycle(site, since, dry_run=False):
+    """Un passage : analyse les téléversements depuis `since`.
+    Renvoie True si le journal a pu être lu."""
+    count = 0
+    try:
+        events = list(site.logevents(logtype="upload", start=since, reverse=True))
+    except Exception as e:
+        log.error("Erreur dans la boucle de surveillance IA : %s", e)
+        return False
 
-    while True:
-        count = 0
+    for event in events:
         try:
-            for event in list(site.logevents(logtype="upload", start=last_timestamp, reverse=True)):
-                try:
-                    logid = event.logid()
-                except Exception:
-                    logid = None
-                if last_logid is not None and logid == last_logid:
-                    continue
-                count += 1
-                try:
-                    process_file_page(site, event.page().title(), dry_run=dry_run)
-                except Exception as e:
-                    log.error("Erreur sur l'événement de téléversement : %s", e)
-                last_timestamp, last_logid = event.timestamp(), logid
+            logid = event.logid()
+        except Exception:
+            logid = None
+        if logid is not None and logid in _seen_logids:
+            continue
+        count += 1
+        try:
+            process_file_page(site, event.page().title(), dry_run=dry_run)
         except Exception as e:
-            log.error("Erreur dans la boucle de surveillance IA : %s", e)
-        if count:   # silence quand il ne s'est rien passé
-            log.info("Sondage terminé : %d téléversement(s) examiné(s).", count)
+            log.error("Erreur sur l'événement de téléversement : %s", e)
+        if logid is not None:
+            _seen_logids.add(logid)
 
-        # Fin du cycle de sondage : mise à jour de l'heure partagée avec les 2 autres bots.
-        try:
-            bot_state.update_last_check(pywikibot.Timestamp.now())
-        except OSError as e:
-            log.warning("Impossible d'écrire l'état partagé : %s", e)
+    if len(_seen_logids) > 5000:
+        _seen_logids.clear()
+    if count:   # silence quand il ne s'est rien passé
+        log.info("Sondage terminé : %d téléversement(s) examiné(s).", count)
+    return True
 
+
+def watch_uploads_for_ai(site, dry_run=False):
+    """Mode autonome (hors main.py) : même cycle de 10 min, état partagé."""
+    since = bot_state.load_last_check() or pywikibot.Timestamp.now()
+    log.info("Sondage du journal des téléversements toutes les %d s (depuis %s UTC).",
+             POLL_INTERVAL, since.isoformat())
+    while True:
+        start = pywikibot.Timestamp.now()
+        if run_cycle(site, since, dry_run=dry_run):
+            since = bot_state.next_since(start)
+            try:
+                bot_state.update_last_check(since)
+            except OSError as e:
+                log.warning("Impossible d'écrire l'état partagé : %s", e)
         time.sleep(POLL_INTERVAL)
 
 
