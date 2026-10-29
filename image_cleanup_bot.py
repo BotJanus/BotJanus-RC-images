@@ -10,7 +10,11 @@ Ce script :
 2. Pour chaque image supprimée, récupère la liste des pages qui la
    référencent via l'API `backlinks` (fonctionne même après suppression,
    car la table pagelinks n'est pas effacée immédiatement).
-3. Supprime la syntaxe [[Fichier:...]] / [[File:...]] correspondante
+3. AVANT de toucher aux articles : vérifie qu'une image similaire (même nom, même
+   contenu ou nom quasi identique) n'existe pas sur Common (voir common_repo.py).
+   Si elle existe, l'article s'affiche toujours correctement : on ne supprime RIEN.
+   Si Common est injoignable, on ne supprime rien non plus et on réessaie au cycle suivant.
+4. Sinon, supprime la syntaxe [[Fichier:...]] / [[File:...]] correspondante
    dans le wikicode de ces pages et sauvegarde la modification.
 
 Dépendances : pywikibot
@@ -29,15 +33,14 @@ le bot ferait, sans réellement sauvegarder les pages.
 """
 
 import re
-import sys
-import time
 import logging
-from datetime import datetime, timedelta, timezone
 
 import pywikibot
-from pywikibot import pagegenerators
 
-import bot_state
+import bot_clock
+import bot_config
+import cycle
+from common_repo import CommonError, CommonRepo
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -48,15 +51,14 @@ FAMILY = "vikidia"          # nécessite une family file "vikidia" pour pywikibo
 FILE_NAMESPACE = 6          # "Fichier" sur Vikidia FR
 ARTICLE_NAMESPACES = [0]    # namespace des articles (0 = principal)
 
-POLL_INTERVAL = bot_state.POLL_INTERVAL  # secondes entre chaque vérification des RC
 DRY_RUN = False              # True = simulation, ne sauvegarde rien
 EDIT_SUMMARY = "Bot : suppression du lien vers une image supprimée"
 SLEEP_BETWEEN_EDITS = 2     # secondes, pour ne pas spammer l'API
+MAX_ATTEMPTS = 3            # essais max si Common est injoignable, ensuite on abandonne cette image
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+# Résultats de process_deleted_file
+DONE, SKIPPED, RETRY = "done", "skipped", "retry"
+
 log = logging.getLogger("vikidia-image-cleanup")
 
 
@@ -101,11 +103,11 @@ def clean_text(text: str, file_title_no_ns: str) -> str:
 # DÉTECTION DES SUPPRESSIONS D'IMAGES
 # ---------------------------------------------------------------------------
 
-def get_recent_file_deletions(site: pywikibot.site.APISite, since: datetime):
+def get_recent_file_deletions(site: pywikibot.site.APISite, since):
     """
     Récupère les entrées du journal de suppression concernant le
     namespace Fichier depuis `since`.
-    Retourne une liste de titres de fichiers (avec préfixe namespace).
+    Retourne une liste de (logid, titre) du plus ancien au plus récent.
     """
     deleted_files = []
     for entry in site.logevents(
@@ -117,11 +119,12 @@ def get_recent_file_deletions(site: pywikibot.site.APISite, since: datetime):
     ):
         try:
             title = entry.page().title()
+            logid = entry.logid()
         except Exception:
             continue
         # Seules les suppressions de page (pas restaurations/révisions) nous intéressent
-        if entry.action() in ("delete", "delete_redir"):
-            deleted_files.append(title)
+        if entry.action() in ("delete", "delete_redir", "delete_redir2"):
+            deleted_files.append((logid, title))
     return deleted_files
 
 
@@ -129,10 +132,21 @@ def get_recent_file_deletions(site: pywikibot.site.APISite, since: datetime):
 # TRAITEMENT D'UNE IMAGE SUPPRIMÉE
 # ---------------------------------------------------------------------------
 
+_common = {}
+
+
+def get_common(site):
+    if site not in _common:
+        _common[site] = CommonRepo(site)
+    return _common[site]
+
+
 def process_deleted_file(site: pywikibot.site.APISite, file_title: str):
     """
     Pour un fichier supprimé donné (ex: 'Fichier:Exemple.png'),
     trouve les pages qui le référencent et nettoie le wikicode.
+    Renvoie DONE (traité), SKIPPED (rien à faire / volontairement ignoré) ou
+    RETRY (vérification impossible pour l'instant : à refaire plus tard).
     """
     log.info("Traitement de l'image supprimée : %s", file_title)
 
@@ -144,11 +158,24 @@ def process_deleted_file(site: pywikibot.site.APISite, file_title: str):
     try:
         if file_page.exists():
             log.info("%s existe toujours (probablement ré-uploadée), on ignore.", file_title)
-            return
+            return SKIPPED
     except Exception as e:
-        log.warning("Impossible de vérifier l'existence de %s (%s), on continue par prudence.", file_title, e)
+        log.warning("Impossible de vérifier l'existence de %s (%s) : on réessaiera.", file_title, e)
+        return RETRY
 
     file_title_no_ns = file_page.title(with_ns=False)
+
+    # Une image similaire existe sur Common ? Alors les articles l'affichent toujours : on ne touche à rien.
+    try:
+        match = get_common(site).find_similar(file_title_no_ns)
+    except CommonError as e:
+        log.warning("Vérification sur Common impossible pour %s (%s) : rien n'est supprimé, on réessaiera.",
+                    file_title, e)
+        return RETRY
+    if match:
+        log.info("Image similaire sur Common pour %s : %s → aucune suppression dans les articles.",
+                 file_title, match)
+        return SKIPPED
 
     # usingPages() interroge la table imagelinks (usage réel de l'image via
     # [[Fichier:...]]), à ne pas confondre avec backlinks() qui interroge
@@ -162,11 +189,11 @@ def process_deleted_file(site: pywikibot.site.APISite, file_title: str):
         )
     except Exception as e:
         log.error("Impossible de récupérer les pages utilisant %s : %s", file_title, e)
-        return
+        return RETRY
 
     if not using_pages:
         log.info("Aucune page ne référence %s, rien à faire.", file_title)
-        return
+        return SKIPPED
 
     log.info("%d page(s) référencent %s", len(using_pages), file_title)
 
@@ -195,14 +222,16 @@ def process_deleted_file(site: pywikibot.site.APISite, file_title: str):
             except Exception as e:
                 log.error("✗ Échec de la sauvegarde de %s : %s", page.title(), e)
 
-        time.sleep(SLEEP_BETWEEN_EDITS)
+        bot_clock.sleep(SLEEP_BETWEEN_EDITS)
+    return DONE
 
 
 # ---------------------------------------------------------------------------
 # BOUCLE PRINCIPALE
 # ---------------------------------------------------------------------------
 
-_already_processed = set()
+_already_processed = set()     # logid déjà traités (la fenêtre de lecture se chevauche)
+_attempts = {}                  # logid -> nombre d'essais (Common injoignable...)
 
 
 def run_cycle(site, since):
@@ -214,38 +243,45 @@ def run_cycle(site, since):
         log.error("Erreur lors de la lecture du journal de suppression : %s", e)
         return False
 
-    for file_title in deleted_files:
-        if file_title in _already_processed:
+    to_retry = False
+    for logid, file_title in deleted_files:
+        if logid in _already_processed:
             continue
         try:
-            process_deleted_file(site, file_title)
+            result = process_deleted_file(site, file_title)
         except Exception as e:
             log.error("Erreur inattendue sur %s : %s", file_title, e)
-            continue
-        _already_processed.add(file_title)
+            result = RETRY
+        if result == RETRY:
+            _attempts[logid] = _attempts.get(logid, 0) + 1
+            if _attempts[logid] < MAX_ATTEMPTS:
+                to_retry = True     # pas marqué comme traité ; on renvoie False plus bas pour que
+                continue            # la fenêtre n'avance pas et que l'image soit reprise au prochain cycle
+            log.error("Abandon de %s après %d essais.", file_title, MAX_ATTEMPTS)
+        _attempts.pop(logid, None)
+        _already_processed.add(logid)
 
     if len(_already_processed) > 5000:
         _already_processed.clear()
-    return True
+    return not to_retry
 
 
 def main():
-    """Mode autonome (hors main.py) : même cycle de 10 min, état partagé."""
+    """Mode autonome (hors main.py) : même cycle commun, même état partagé."""
+    import config_check
+    import discord_logger
+
+    bot_config.setup_logging()
+    if not discord_logger.is_installed():
+        discord_logger.install()
     site = pywikibot.Site(LANG, FAMILY)
     site.login()
     log.info("Bot démarré sur %s (DRY_RUN=%s)", site, DRY_RUN)
-
-    since = bot_state.load_last_check() or pywikibot.Timestamp.utcnow()
-    while True:
-        start = pywikibot.Timestamp.utcnow()
-        try:
-            if run_cycle(site, since):
-                since = bot_state.next_since(start)
-                bot_state.update_last_check(since)
-        except KeyboardInterrupt:
-            log.info("Arrêt demandé par l'utilisateur.")
-            sys.exit(0)
-        time.sleep(POLL_INTERVAL)
+    config_check.run(site, scripts=("cleanup",))
+    try:
+        cycle.run_loop(site, [("image_cleanup_bot", run_cycle)])
+    except KeyboardInterrupt:
+        log.info("Arrêt demandé par l'utilisateur.")
 
 
 if __name__ == "__main__":

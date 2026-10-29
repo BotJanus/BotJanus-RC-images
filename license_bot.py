@@ -21,22 +21,19 @@ ne produit pas de doublon.
 """
 
 import logging
-import sys
-import time
+
 import pywikibot
 
-import bot_state
+import bot_clock
+import bot_config
+import cycle
 
 # ==========================================================================
 # CONFIGURATION
 # ==========================================================================
 
 DRY_RUN = False               # True = simulation, aucune écriture sur le wiki
-POLL_INTERVAL = bot_state.POLL_INTERVAL            # secondes entre deux sondages du journal des téléversements
-PROCESS_BACKLOG = False       # False = ne traite que les téléversements à partir du démarrage
-                               # True = traite aussi les téléversements déjà existants (attention,
-                               # peut représenter énormément de pages au premier lancement),
-                               # ignoré si un état partagé (bot_state.txt) existe déjà
+LICENSES_TTL = 3600           # secondes entre deux relectures de Catégorie:Modèle licence
 
 LICENSE_MODELS_CATEGORY = "Modèle licence"               # Catégorie:Modèle licence
 UNKNOWN_LICENSE_TEMPLATES = {"Licence inconnue", "LI"}    # marqueurs "pas de licence", exclus
@@ -49,11 +46,6 @@ TALK_MESSAGE = "{{subst:Image oubli|%s}} ~~~~"
 EDIT_SUMMARY_FILE = "Bot : pose de {{LI}} — aucune licence reconnue détectée sur ce fichier"
 EDIT_SUMMARY_TALK = "Bot : notification — licence manquante sur un fichier téléversé"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    stream=sys.stdout,
-)
 log = logging.getLogger("botjanus")
 
 
@@ -69,6 +61,24 @@ def get_known_license_templates(site):
     known = {page.title(with_ns=False) for page in members}
 
     return known - UNKNOWN_LICENSE_TEMPLATES
+
+
+_licenses = {"set": None, "at": 0.0}
+
+
+def known_licenses(site, force=False):
+    """Modèles de licence reconnus, relus au plus toutes les LICENSES_TTL secondes : un modèle
+    ajouté à la catégorie en cours de route est pris en compte sans redémarrer le bot.
+    En cas d'échec de relecture on garde la dernière liste connue."""
+    fresh = _licenses["set"] is not None and bot_clock.monotonic() - _licenses["at"] < LICENSES_TTL
+    if force or not fresh:
+        try:
+            _licenses["set"] = get_known_license_templates(site)
+            _licenses["at"] = bot_clock.monotonic()
+            log.info("%d modèle(s) de licence reconnu(s).", len(_licenses["set"]))
+        except Exception as e:
+            log.warning("Relecture de la liste des licences impossible : %s", e)
+    return _licenses["set"] or set()
 
 
 def page_has_recognized_license(page, known_license_templates):
@@ -167,20 +177,21 @@ def process_file(site, page, known_license_templates, dry_run):
 # SURVEILLANCE DU JOURNAL DES TÉLÉVERSEMENTS
 # ==========================================================================
 
-def fetch_new_uploads(site, since_timestamp):
-    """Renvoie la liste des événements de téléversement depuis `since_timestamp` (inclus),
-    du plus ancien au plus récent."""
-    return list(site.logevents(logtype="upload", start=since_timestamp, reverse=True))
-
-
 _seen_logids = set()
 
 
-def run_cycle(site, since, known_license_templates, dry_run=DRY_RUN):
+def run_cycle(site, since, dry_run=DRY_RUN):
     """Un passage : traite les téléversements depuis `since`.
     Renvoie True si le journal a pu être lu (le cycle compte comme réussi)."""
+    known = known_licenses(site)
+    if not known:
+        # Sans liste de licences, TOUS les fichiers seraient étiquetés {{LI}} : on s'abstient.
+        log.error("Aucun modèle de licence connu (%s vide ou illisible) : cycle ignoré.",
+                  LICENSE_MODELS_CATEGORY)
+        return False
+
     try:
-        events = fetch_new_uploads(site, since)
+        events = cycle.upload_events(site, since)
     except Exception as e:
         log.error("Erreur lors du sondage du journal des téléversements : %s", e)
         return False
@@ -202,7 +213,7 @@ def run_cycle(site, since, known_license_templates, dry_run=DRY_RUN):
             continue
 
         try:
-            process_file(site, page, known_license_templates, dry_run=dry_run)
+            process_file(site, page, known, dry_run=dry_run)
         except Exception as e:
             log.error("Erreur inattendue lors du traitement de %s : %s", page.title(), e)
 
@@ -214,32 +225,22 @@ def run_cycle(site, since, known_license_templates, dry_run=DRY_RUN):
     return True
 
 
-def watch_uploads(site, known_license_templates, dry_run):
-    """Mode autonome (hors main.py) : même cycle de 10 min, état partagé."""
-    since = bot_state.load_last_check() or pywikibot.Timestamp.utcnow()
-    log.info("Bot démarré, sondage toutes les %d secondes (depuis %s UTC).",
-             POLL_INTERVAL, since.isoformat())
-    while True:
-        start = pywikibot.Timestamp.utcnow()
-        if run_cycle(site, since, known_license_templates, dry_run):
-            since = bot_state.next_since(start)
-            bot_state.update_last_check(since)
-        time.sleep(POLL_INTERVAL)
-
-
 def main():
+    """Mode autonome (hors main.py) : même cycle commun, même état partagé."""
+    import config_check
+    import discord_logger
+
+    bot_config.setup_logging()
+    if not discord_logger.is_installed():
+        discord_logger.install()
     if DRY_RUN:
         log.info("=== MODE DRY-RUN : aucune modification ne sera écrite sur le wiki ===")
 
     site = pywikibot.Site("fr", "vikidia")
     site.login()
-
-    log.info("Récupération des modèles de licence reconnus (Catégorie:Modèle licence)...")
-    known_license_templates = get_known_license_templates(site)
-    log.info("%d modèle(s) de licence reconnu(s).", len(known_license_templates))
-
+    config_check.run(site, scripts=("license",))
     try:
-        watch_uploads(site, known_license_templates, dry_run=DRY_RUN)
+        cycle.run_loop(site, [("license_bot", run_cycle)])
     except KeyboardInterrupt:
         log.info("Arrêt demandé (Ctrl+C), fin du bot.")
 

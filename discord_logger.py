@@ -3,8 +3,8 @@
 """
 discord_logger — envoie chaque nouveau log vers un webhook Discord.
 
-Rendu : un titre en gras (« 📡 **BotJanus RC (...)** ») suivi d'un bloc de code
-contenant les lignes de log, comme sur la capture d'écran.
+Rendu : un titre en gras (nom + description uniques, voir bot_config.BOT_TITLE) suivi d'un
+bloc de code contenant les lignes de log.
 
 Les logs sont regroupés par lots (quelques secondes) pour ne pas se faire
 bloquer par le rate-limit de Discord, et envoyés depuis un thread dédié :
@@ -19,15 +19,14 @@ Deux modes d'envoi (le premier trouvé est utilisé) :
   1. Compte du bot :  DISCORD_BOT_TOKEN + DISCORD_LOG_CHANNEL_ID
   2. Webhook :        DISCORD_WEBHOOK_URL
 
-Les variables sont lues dans l'environnement, puis dans un fichier d'env
-(ordre : $DISCORD_ENV_FILE, env/rc-images.env, .env — à côté de ce fichier).
+Les variables sont lues dans l'environnement, puis dans les fichiers d'env chargés par
+bot_config.load_env() (chargeur unique pour tout le projet).
 
 Variables :
     DISCORD_BOT_TOKEN       token du compte bot (mode 1)
     DISCORD_LOG_CHANNEL_ID  id du salon où poster (mode 1)
     DISCORD_WEBHOOK_URL     URL du webhook (mode 2)
     DISCORD_LOG_LEVEL     niveau minimum envoyé (défaut : INFO)
-    DISCORD_LOG_TITLE     titre affiché au-dessus de chaque message
     DISCORD_LOG_USERNAME  nom d'affichage du webhook (mode 2, optionnel)
     DISCORD_LOG_BATCH     secondes d'attente pour regrouper les logs (défaut : 2)
 """
@@ -38,12 +37,13 @@ import logging
 import os
 import queue
 import threading
-import time
 
 import requests
-from datetime import datetime, timezone
 
-DEFAULT_TITLE = "📡 **BotJanus RC (licences + nettoyage + détecteur IA)**"
+import bot_clock
+import bot_config
+
+DEFAULT_TITLE = bot_config.BOT_TITLE
 DISCORD_MAX = 2000          # limite de caractères d'un message Discord
 FENCE_OVERHEAD = 8          # "```\n" + "\n```"
 _STOP = object()
@@ -98,9 +98,9 @@ class DiscordWebhookHandler(logging.Handler):
                 continue
             pending_embed = None
             lines = [item]
-            deadline = time.monotonic() + self.batch_seconds
+            deadline = bot_clock.monotonic() + self.batch_seconds
             while True:  # regroupe les logs arrivant dans la fenêtre
-                remaining = deadline - time.monotonic()
+                remaining = deadline - bot_clock.monotonic()
                 if remaining <= 0:
                     break
                 try:
@@ -161,17 +161,17 @@ class DiscordWebhookHandler(logging.Handler):
             try:
                 r = self._session.post(self.url, json=payload, timeout=10)
             except requests.RequestException:
-                time.sleep(5)
+                bot_clock.sleep(5)
                 continue
             if r.status_code == 429:               # rate-limit : on attend
                 try:
                     wait = float(r.json().get("retry_after", 1))
                 except Exception:
                     wait = float(r.headers.get("Retry-After", 1))
-                time.sleep(min(wait, 30) + 0.1)
+                bot_clock.sleep(min(wait, 30) + 0.1)
                 continue
             if r.status_code >= 500:
-                time.sleep(3)
+                bot_clock.sleep(3)
                 continue
             return                                  # succès ou erreur 4xx définitive
         # abandon silencieux : on ne logge pas ici pour éviter une boucle
@@ -204,26 +204,34 @@ def _read_action(consume=True):
     return data
 
 
+def build_embed(title, description="", color=0x95A5A6, fields=None, thumbnail_url=None, footer=None):
+    """Construit un embed au format commun à tous les scripts (heure via bot_clock).
+    `fields` : liste de (nom, valeur, inline)."""
+    embed = {
+        "title": title[:256],
+        "description": description[:4000],
+        "color": color,
+        "timestamp": bot_clock.iso(),
+        "footer": {"text": footer or bot_config.BOT_NAME},
+    }
+    if fields:
+        embed["fields"] = [{"name": str(n)[:256], "value": str(v)[:1000] or "—", "inline": bool(i)}
+                           for n, v, i in fields][:25]
+    if thumbnail_url:
+        embed["thumbnail"] = {"url": thumbnail_url}
+    return embed
+
+
 def _announce(data):
     if not _handler or not data or data.get("action") not in _STYLE:
         return
     color, title, result = _STYLE[data["action"]]
-    sid = os.environ.get("BOTJANUS_SERVICE_ID", "rc-images")
-    label = os.environ.get("BOTJANUS_SERVICE_LABEL", sid)
-    at = float(data.get("at") or time.time())
-    embed = {
-        "title": title,
-        "description": f"**{label}**\n> {result}",
-        "color": color,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "fields": [
-            {"name": "Script", "value": f"`agent-{sid}`", "inline": True},
-            {"name": "Demandé par", "value": str(data.get("who") or "—"), "inline": True},
-            {"name": "Traité en", "value": f"{max(0, round(time.time() - at))}s", "inline": True},
-        ],
-        "footer": {"text": "BotJanus • Scripts continus"},
-    }
-    _handler.send_embed(embed)
+    at = float(data.get("at") or bot_clock.epoch())
+    _handler.send_embed(build_embed(
+        title, "**%s**\n> %s" % (bot_config.BOT_NAME, result), color,
+        fields=[("Script", "`agent-%s`" % bot_config.SERVICE_ID, True),
+                ("Demandé par", str(data.get("who") or "—"), True),
+                ("Traité en", "%ds" % max(0, round(bot_clock.epoch() - at)), True)]))
 
 
 def send_embed(embed):
@@ -255,29 +263,10 @@ def announce_stopping():
         _announce(data)
 
 
-def _load_env_file():
-    """Charge un fichier KEY=VALUE (sans écraser l'environnement existant)."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [os.environ.get("DISCORD_ENV_FILE"),
-                  os.path.join(here, "env", "rc-images.env"),
-                  os.path.join(here, ".env")]
-    for path in candidates:
-        if path and os.path.isfile(path):
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-            return path
-    return None
-
-
 def install(url=None, logger=None):
     """Branche le handler sur le logger racine (tous les bots) et le renvoie.
     Ne fait rien si ni compte bot ni webhook ne sont configurés."""
-    _load_env_file()
+    bot_config.load_env()
     token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
     channel_id = os.environ.get("DISCORD_LOG_CHANNEL_ID", "").strip()
     headers = None
@@ -293,7 +282,7 @@ def install(url=None, logger=None):
     level = getattr(logging, os.environ.get("DISCORD_LOG_LEVEL", "INFO").upper(), logging.INFO)
     handler = DiscordWebhookHandler(
         url,
-        title=os.environ.get("DISCORD_LOG_TITLE", DEFAULT_TITLE),
+        title=DEFAULT_TITLE,
         username=None if headers else (os.environ.get("DISCORD_LOG_USERNAME") or None),
         batch_seconds=float(os.environ.get("DISCORD_LOG_BATCH", "2")),
         level=level,
@@ -304,3 +293,14 @@ def install(url=None, logger=None):
     global _handler
     _handler = handler
     return handler
+
+
+def is_installed():
+    return _handler is not None
+
+
+def mode():
+    """« bot » (compte bot), « webhook » ou None — pour le contrôle de configuration."""
+    if _handler is None:
+        return None
+    return "bot" if "Authorization" in _handler._session.headers else "webhook"

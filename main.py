@@ -1,58 +1,59 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Launcher — lance BotJanus (license_bot.py), le bot de nettoyage d'images
-supprimées (image_cleanup_bot.py) et le détecteur d'images IA (ai_detector.py)
-dans UN SEUL cycle commun, toutes les 10 minutes (600 s),
-à la suite, avec un horodatage partagé (bot_state.txt).
+Launcher — BotJanus RC-images.
+
+Surveillance des téléversements : licences, nettoyage des images supprimées et analyse IA.
+(Nom et description : bot_config.BOT_NAME / BOT_DESCRIPTION.)
+
+Lance les 3 scripts — license_bot.py, image_cleanup_bot.py, ai_detector.py — dans UN SEUL
+cycle commun, toutes les 10 minutes, à la suite, avec une heure et un état partagés
+(bot_clock.py, bot_state.py, boucle dans cycle.py).
 
 Usage :
-    python main.py
-    (Ctrl+C pour arrêter l'ensemble)
+    python main.py           lance le bot (Ctrl+C pour arrêter l'ensemble)
+    python main.py --check   contrôle de configuration seul (logs + embed Discord), puis quitte
 """
 
+import argparse
+import logging
 import signal
 import sys
-import time
-import logging
 
 import pywikibot
-import license_bot
-import image_cleanup_bot
+
 import ai_detector
-import bot_state
+import bot_config
+import config_check
+import cycle
+import discord_logger
+import image_cleanup_bot
+import license_bot
 
-# Initialisation de la session Pywikibot globale
-site = pywikibot.Site("fr", "vikidia")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    stream=sys.stdout,
-)
+bot_config.setup_logging()
 log = logging.getLogger("launcher")
 
-# Envoie chaque log vers le webhook Discord (DISCORD_BOT_TOKEN + DISCORD_LOG_CHANNEL_ID, voir env/agent.env).
-import discord_logger
+# Envoie chaque log vers Discord (DISCORD_BOT_TOKEN + DISCORD_LOG_CHANNEL_ID, ou webhook).
 discord_logger.install()
 
 
-def run_step(name, fn):
-    """Exécute une étape du cycle ; une erreur n'arrête ni les autres étapes ni la boucle.
-    Renvoie True si l'étape a réussi."""
-    try:
-        return bool(fn())
-    except Exception:
-        log.exception("L'étape '%s' a échoué (le cycle continue).", name)
-        return False
-
-
 def main():
-    discord_logger.announce_started()   # embed « démarré / redémarré » : posté AVANT les logs
+    parser = argparse.ArgumentParser(description=bot_config.BOT_DESCRIPTION)
+    parser.add_argument("--check", action="store_true",
+                        help="contrôle de configuration seul, sans lancer le bot")
+    args = parser.parse_args()
 
+    if not args.check:
+        discord_logger.announce_started()   # embed « démarré / redémarré » : posté AVANT les logs
+
+    site = pywikibot.Site("fr", "vikidia")
     site.login()
-    known_licenses = license_bot.get_known_license_templates(site)
-    log.info("%d modèle(s) de licence reconnu(s).", len(known_licenses))
+
+    # Message de configuration (logs + embed) : tout est-il chargé et utilisable ?
+    report = config_check.run(site)
+    if args.check:
+        logging.shutdown()               # vide la file Discord avant de quitter
+        sys.exit(0 if report.status != config_check.ERR else 1)
 
     def _on_sigterm(signum, frame):     # arrêt demandé par l'agent
         discord_logger.announce_stopping()   # embed « arrêté » : posté AVANT les logs d'arrêt
@@ -62,36 +63,13 @@ def main():
 
     signal.signal(signal.SIGTERM, _on_sigterm)
 
-    # Reprise depuis le dernier passage partagé, sinon "maintenant".
-    since = bot_state.load_last_check() or pywikibot.Timestamp.utcnow()
-    log.info("Cycle commun toutes les %d s, première fenêtre depuis %s UTC.",
-             bot_state.POLL_INTERVAL, since.isoformat())
-
+    steps = [
+        ("license_bot", license_bot.run_cycle),
+        ("image_cleanup_bot", image_cleanup_bot.run_cycle),
+        ("ai_detector", ai_detector.run_cycle),
+    ]
     try:
-        while True:
-            start = pywikibot.Timestamp.utcnow()
-
-            steps = [
-                ("license_bot", lambda: license_bot.run_cycle(site, since, known_licenses)),
-                ("image_cleanup_bot", lambda: image_cleanup_bot.run_cycle(site, since)),
-                ("ai_detector", lambda: ai_detector.run_cycle(site, since)),
-            ]
-            results = [run_step(name, fn) for name, fn in steps]
-
-            # La fenêtre n'avance que si les 3 scripts ont pu lire leur journal :
-            # sinon on réessaie la même fenêtre au prochain cycle (doublons filtrés).
-            if all(results):
-                since = bot_state.next_since(start)
-                try:
-                    bot_state.update_last_check(since)
-                except OSError as e:
-                    log.warning("Impossible d'écrire l'état partagé : %s", e)
-            else:
-                log.warning("Cycle incomplet %s : fenêtre conservée.", results)
-
-            # Un cycle toutes les 10 minutes, durée d'exécution comprise.
-            elapsed = (pywikibot.Timestamp.utcnow() - start).total_seconds()
-            time.sleep(max(1, bot_state.POLL_INTERVAL - elapsed))
+        cycle.run_loop(site, steps)
     except KeyboardInterrupt:
         log.info("Arrêt demandé (Ctrl+C). Fin du launcher.")
         sys.exit(0)
