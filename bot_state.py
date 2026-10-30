@@ -27,10 +27,11 @@ import os
 import threading
 
 import bot_clock
+import bot_config
 
 log = logging.getLogger("bot_state")
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_state.txt")
+STATE_FILE = os.path.join(bot_config.DATA_DIR, "bot_state.txt")
 
 POLL_INTERVAL = 600          # secondes : un cycle commun aux 3 scripts toutes les 10 minutes
 OVERLAP_MARGIN = 60          # secondes de chevauchement entre deux fenêtres (doublons filtrés par logid)

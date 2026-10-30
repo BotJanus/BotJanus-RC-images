@@ -17,6 +17,14 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Dossier des données écrites par le bot (bot_state.txt...), hors du code : /data/rc-images
+# (surchargeable avec BOTJANUS_DATA_DIR). Créé au besoin ; si impossible, repli sur le dossier du code.
+DATA_DIR = os.environ.get("BOTJANUS_DATA_DIR", "/data/rc-images")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except OSError:
+    DATA_DIR = HERE
+
 BOT_NAME = "BotJanus RC-images"
 BOT_DESCRIPTION = "Surveillance des téléversements : licences, nettoyage des images supprimées et analyse IA"
 BOT_TITLE = "📡 **%s** — %s" % (BOT_NAME, BOT_DESCRIPTION)     # en-tête des messages de log Discord

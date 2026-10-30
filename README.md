@@ -20,7 +20,7 @@ Lancés ensemble par `main.py`, dans **un seul cycle commun toutes les 10 minute
 | Fichier | Rôle |
 |---|---|
 | `bot_clock.py` | **Seule** source de l'heure (UTC conscient, format ISO unique). Plus aucun `datetime.now` / `time.time` / `Timestamp.utcnow` ailleurs. |
-| `bot_state.py` | `bot_state.txt` (JSON) : `since` (fenêtre de lecture) + `heartbeat` (battu toutes les 30 s par un thread). |
+| `bot_state.py` | `/data/rc-images/bot_state.txt` (JSON ; dossier réglable via `BOTJANUS_DATA_DIR`) : `since` (fenêtre de lecture) + `heartbeat` (battu toutes les 30 s par un thread). |
 | `bot_config.py` | Nom/description, chargeur `.env` unique, logging. |
 | `cycle.py` | Boucle commune (main.py **et** modes autonomes) + un seul appel API pour le journal des téléversements. |
 | `common_repo.py` | Recherche d'images similaires sur Common. |
@@ -49,7 +49,7 @@ Les mêmes lignes vont dans les logs (en `WARNING`, jamais `ERROR`, pour ne pas 
 
 ## Statut « Dégradé » du dashboard
 
-L'agent lit le champ `heartbeat` de `bot_state.txt`. Il passe « Dégradé » si le heartbeat a plus de 5 min
+L'agent lit le champ `heartbeat` de `/data/rc-images/bot_state.txt`. Il passe « Dégradé » si le heartbeat a plus de 5 min
 (le bot bat toutes les 30 s ; arrêt des battements si un cycle dépasse 30 min), ou si au moins 3 erreurs
 `ERROR` ont été loguées dans les 15 dernières minutes.
 
