@@ -11,7 +11,7 @@ Lancés ensemble par `main.py`, dans **un seul cycle commun toutes les 10 minute
 
 | Script | Rôle |
 |---|---|
-| `license_bot.py` | Pose `{{LI}}` sur les fichiers sans licence reconnue et prévient le téléverseur. La liste des licences est relue toutes les heures. |
+| `license_bot.py` | Pose `{{LI}}` sur les fichiers sans licence reconnue et prévient le téléverseur. La liste des licences est lue une seule fois, au démarrage, par le contrôle de configuration (jamais relue ensuite : redémarrer le bot pour la mettre à jour). |
 | `image_cleanup_bot.py` | Retire des articles les images supprimées. **Avant de retirer quoi que ce soit, cherche une image similaire sur Common** (même nom, même contenu SHA-1, ou nom quasi identique) : si elle existe, rien n'est supprimé. Si Common est injoignable, rien n'est supprimé non plus et l'image est reprise au cycle suivant (3 essais). |
 | `ai_detector.py` | Détection d'images IA en 3 étapes (métadonnées → OpenAI → SightEngine) + modération. |
 

@@ -127,7 +127,7 @@ def _license_checks(site):
     if site is None:
         return checks + [Check(WARN, "Modèles de licence", "non vérifiés (pas de wiki)")]
 
-    known = license_bot.known_licenses(site)
+    known = license_bot.known_licenses(site, force=True)  # lecture unique, au démarrage
     checks.append(Check(OK if known else ERR, "Modèles de licence",
                         "%d reconnus (Catégorie:%s)" % (len(known), license_bot.LICENSE_MODELS_CATEGORY) if known else
                         "Catégorie:%s vide ou illisible : le script refusera de tourner" % license_bot.LICENSE_MODELS_CATEGORY))

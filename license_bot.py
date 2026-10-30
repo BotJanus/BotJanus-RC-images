@@ -33,7 +33,6 @@ import cycle
 # ==========================================================================
 
 DRY_RUN = False               # True = simulation, aucune écriture sur le wiki
-LICENSES_TTL = 3600           # secondes entre deux relectures de Catégorie:Modèle licence
 
 LICENSE_MODELS_CATEGORY = "Modèle licence"               # Catégorie:Modèle licence
 UNKNOWN_LICENSE_TEMPLATES = {"Licence inconnue", "LI"}    # marqueurs "pas de licence", exclus
@@ -63,21 +62,20 @@ def get_known_license_templates(site):
     return known - UNKNOWN_LICENSE_TEMPLATES
 
 
-_licenses = {"set": None, "at": 0.0}
+_licenses = {"set": None}
 
 
 def known_licenses(site, force=False):
-    """Modèles de licence reconnus, relus au plus toutes les LICENSES_TTL secondes : un modèle
-    ajouté à la catégorie en cours de route est pris en compte sans redémarrer le bot.
-    En cas d'échec de relecture on garde la dernière liste connue."""
-    fresh = _licenses["set"] is not None and bot_clock.monotonic() - _licenses["at"] < LICENSES_TTL
-    if force or not fresh:
+    """Modèles de licence reconnus. La catégorie n'est lue qu'UNE fois, au démarrage, par le
+    contrôle de configuration (config_check, `force=True`) ; ensuite la liste est gardée en mémoire
+    et jamais relue. Seul filet : si le contrôle n'a rien pu charger (liste jamais lue), le premier
+    cycle retente la lecture."""
+    if force or _licenses["set"] is None:
         try:
             _licenses["set"] = get_known_license_templates(site)
-            _licenses["at"] = bot_clock.monotonic()
-            log.info("%d modèle(s) de licence reconnu(s).", len(_licenses["set"]))
+            log.info("%d modèle(s) de licence reconnu(s) (lus au démarrage).", len(_licenses["set"]))
         except Exception as e:
-            log.warning("Relecture de la liste des licences impossible : %s", e)
+            log.warning("Lecture de la liste des licences impossible : %s", e)
     return _licenses["set"] or set()
 
 
