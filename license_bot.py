@@ -21,22 +21,18 @@ ne produit pas de doublon.
 """
 
 import logging
-import sys
-import time
+
 import pywikibot
 
-import bot_state
+import bot_clock
+import bot_config
+import cycle
 
 # ==========================================================================
 # CONFIGURATION
 # ==========================================================================
 
 DRY_RUN = False               # True = simulation, aucune écriture sur le wiki
-POLL_INTERVAL = 600            # secondes entre deux sondages du journal des téléversements
-PROCESS_BACKLOG = False       # False = ne traite que les téléversements à partir du démarrage
-                               # True = traite aussi les téléversements déjà existants (attention,
-                               # peut représenter énormément de pages au premier lancement),
-                               # ignoré si un état partagé (bot_state.txt) existe déjà
 
 LICENSE_MODELS_CATEGORY = "Modèle licence"               # Catégorie:Modèle licence
 UNKNOWN_LICENSE_TEMPLATES = {"Licence inconnue", "LI"}    # marqueurs "pas de licence", exclus
@@ -49,11 +45,6 @@ TALK_MESSAGE = "{{subst:Image oubli|%s}} ~~~~"
 EDIT_SUMMARY_FILE = "Bot : pose de {{LI}} — aucune licence reconnue détectée sur ce fichier"
 EDIT_SUMMARY_TALK = "Bot : notification — licence manquante sur un fichier téléversé"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    stream=sys.stdout,
-)
 log = logging.getLogger("botjanus")
 
 
@@ -69,6 +60,23 @@ def get_known_license_templates(site):
     known = {page.title(with_ns=False) for page in members}
 
     return known - UNKNOWN_LICENSE_TEMPLATES
+
+
+_licenses = {"set": None}
+
+
+def known_licenses(site, force=False):
+    """Modèles de licence reconnus. La catégorie n'est lue qu'UNE fois, au démarrage, par le
+    contrôle de configuration (config_check, `force=True`) ; ensuite la liste est gardée en mémoire
+    et jamais relue. Seul filet : si le contrôle n'a rien pu charger (liste jamais lue), le premier
+    cycle retente la lecture."""
+    if force or _licenses["set"] is None:
+        try:
+            _licenses["set"] = get_known_license_templates(site)
+            log.info("%d modèle(s) de licence reconnu(s) (lus au démarrage).", len(_licenses["set"]))
+        except Exception as e:
+            log.warning("Lecture de la liste des licences impossible : %s", e)
+    return _licenses["set"] or set()
 
 
 def page_has_recognized_license(page, known_license_templates):
@@ -167,93 +175,70 @@ def process_file(site, page, known_license_templates, dry_run):
 # SURVEILLANCE DU JOURNAL DES TÉLÉVERSEMENTS
 # ==========================================================================
 
-def fetch_new_uploads(site, since_timestamp):
-    """Renvoie la liste des événements de téléversement depuis `since_timestamp` (inclus),
-    du plus ancien au plus récent."""
-    return list(site.logevents(logtype="upload", start=since_timestamp, reverse=True))
+_seen_logids = set()
 
 
-def watch_uploads(site, known_license_templates, dry_run):
-    shared_last_check = bot_state.load_last_check()
+def run_cycle(site, since, dry_run=DRY_RUN):
+    """Un passage : traite les téléversements depuis `since`.
+    Renvoie True si le journal a pu être lu (le cycle compte comme réussi)."""
+    known = known_licenses(site)
+    if not known:
+        # Sans liste de licences, TOUS les fichiers seraient étiquetés {{LI}} : on s'abstient.
+        log.error("Aucun modèle de licence connu (%s vide ou illisible) : cycle ignoré.",
+                  LICENSE_MODELS_CATEGORY)
+        return False
 
-    if shared_last_check is not None:
-        # Le bot (ou un des 2 autres) a déjà tourné : on rattrape tout ce qui
-        # s'est passé pendant la coupure, en repartant de la dernière heure
-        # de passage partagée entre les 3 bots.
-        last_timestamp = shared_last_check
-        last_logid = None
-        log.info("Reprise depuis le dernier passage partagé (%s UTC) : rattrapage des"
-                  " téléversements manqués pendant l'arrêt, puis retour au direct.",
-                  last_timestamp.isoformat())
-    elif PROCESS_BACKLOG:
-        # None = pas de borne de début -> tout l'historique des téléversements existants
-        last_timestamp = None
-        last_logid = None
-        log.info("Aucun état partagé (premier lancement). PROCESS_BACKLOG=True :"
-                  " traitement de tout l'historique.")
-    else:
-        last_timestamp = pywikibot.Timestamp.now()
-        last_logid = None
-        log.info("Aucun état partagé (premier lancement). Surveillance à partir de"
-                  " maintenant (%s UTC).", last_timestamp.isoformat())
+    try:
+        events = cycle.upload_events(site, since)
+    except Exception as e:
+        log.error("Erreur lors du sondage du journal des téléversements : %s", e)
+        return False
 
-    log.info("Bot démarré, sondage toutes les %d secondes.", POLL_INTERVAL)
-
-    while True:
+    for event in events:
         try:
-            events = fetch_new_uploads(site, last_timestamp)
-        except Exception as e:
-            log.error("Erreur lors du sondage du journal des téléversements : %s", e)
-            time.sleep(POLL_INTERVAL)
+            logid = event.logid()
+        except Exception:
+            logid = None
+
+        # La fenêtre se chevauche : on ignore les événements déjà traités.
+        if logid is not None and logid in _seen_logids:
             continue
 
-        for event in events:
-            try:
-                logid = event.logid()
-            except Exception:
-                logid = None
+        try:
+            page = event.page()
+        except Exception as e:
+            log.warning("Impossible de récupérer la page associée à l'événement : %s", e)
+            continue
 
-            ts = event.timestamp()
+        try:
+            process_file(site, page, known, dry_run=dry_run)
+        except Exception as e:
+            log.error("Erreur inattendue lors du traitement de %s : %s", page.title(), e)
 
-            # Évite de retraiter le tout dernier événement déjà vu au sondage précédent
-            # (la fenêtre 'start' est inclusive).
-            if last_logid is not None and logid == last_logid:
-                continue
+        if logid is not None:
+            _seen_logids.add(logid)
 
-            try:
-                page = event.page()
-            except Exception as e:
-                log.warning("Impossible de récupérer la page associée à l'événement : %s", e)
-                continue
-
-            try:
-                process_file(site, page, known_license_templates, dry_run=dry_run)
-            except Exception as e:
-                log.error("Erreur inattendue lors du traitement de %s : %s", page.title(), e)
-
-            last_timestamp = ts
-            last_logid = logid
-
-        # Fin du cycle de sondage : on met à jour l'heure de dernier passage
-        # partagée avec les 2 autres bots.
-        bot_state.update_last_check(pywikibot.Timestamp.now())
-
-        time.sleep(POLL_INTERVAL)
+    if len(_seen_logids) > 5000:
+        _seen_logids.clear()
+    return True
 
 
 def main():
+    """Mode autonome (hors main.py) : même cycle commun, même état partagé."""
+    import config_check
+    import discord_logger
+
+    bot_config.setup_logging()
+    if not discord_logger.is_installed():
+        discord_logger.install()
     if DRY_RUN:
         log.info("=== MODE DRY-RUN : aucune modification ne sera écrite sur le wiki ===")
 
     site = pywikibot.Site("fr", "vikidia")
     site.login()
-
-    log.info("Récupération des modèles de licence reconnus (Catégorie:Modèle licence)...")
-    known_license_templates = get_known_license_templates(site)
-    log.info("%d modèle(s) de licence reconnu(s).", len(known_license_templates))
-
+    config_check.run(site, scripts=("license",))
     try:
-        watch_uploads(site, known_license_templates, dry_run=DRY_RUN)
+        cycle.run_loop(site, [("license_bot", run_cycle)])
     except KeyboardInterrupt:
         log.info("Arrêt demandé (Ctrl+C), fin du bot.")
 

@@ -17,38 +17,39 @@ Mode test ponctuel :
 Mode surveillance continue (lancé via main.py) :
     python ai_detector.py
 
-Variables d'environnement (ou fichier .env / env/agent.env) :
+Variables d'environnement (ou fichier .env / env/agent.env, chargés par bot_config) :
     OPENAI_API_KEY            clé OpenAI (étape 2 ; étape ignorée si absente)
     SIGHTENGINE_API_USER      identifiant SightEngine (étape 3)
     SIGHTENGINE_API_SECRET    secret SightEngine (étape 3)
-    AI_SCORE_THRESHOLD        seuil `ai_generated` en % (défaut 95)
+    AI_SCORE_THRESHOLD        seuil `ai_generated` en % (défaut 90)
     MODERATION_THRESHOLD      seuil de modération en % (défaut 80)
     MODERATION_TEMPLATE       modèle wiki posé si contenu inapproprié, ex. {{Image inappropriée}}
                               (vide par défaut = alerte Discord uniquement, aucune écriture)
     MODERATE_ALWAYS           "1" = modérer même si l'étape 1/2 conclut déjà à de l'IA
                               (1 appel SightEngine supplémentaire ; défaut : 0)
-    AI_DETECTOR_WEBHOOK_URL   webhook Discord dédié (facultatif)
+    (les embeds Discord passent par discord_logger : DISCORD_BOT_TOKEN + DISCORD_LOG_CHANNEL_ID,
+     plus de webhook dédié)
 """
 
 import argparse
 import io
 import json
 import logging
-import os
 import re
-import sys
-import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 import requests
 
+import bot_clock
+import bot_config
+import cycle
+import discord_logger
+
 try:                                    # pywikibot n'est requis que pour le mode wiki
     import pywikibot
-    import bot_state
 except ImportError:                     # permet de tester le pipeline seul
     pywikibot = None
-    bot_state = None
 
 # --- dépendances optionnelles : leur absence ne doit jamais faire planter le bot ---
 try:
@@ -73,51 +74,33 @@ except ImportError:
 # CONFIGURATION
 # ==========================================================================
 
-def load_env_file(filepath):
-    """Injecte dans os.environ les variables d'un fichier .env (sans écraser l'existant)."""
-    if not os.path.exists(filepath):
-        return
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip().strip("'\""))
-
-
-_here = os.path.dirname(os.path.abspath(__file__))
-for _p in (".env", "env/agent.env", os.path.join(_here, ".env"), os.path.join(_here, "env", "agent.env")):
-    load_env_file(_p)
-
-
-def _float_env(name, default):
-    try:
-        return float(os.getenv(name, default))
-    except ValueError:
-        return float(default)
-
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER", "").strip()
-SIGHTENGINE_API_SECRET = os.getenv("SIGHTENGINE_API_SECRET", "").strip()
+OPENAI_API_KEY = bot_config.env_str("OPENAI_API_KEY")
+SIGHTENGINE_API_USER = bot_config.env_str("SIGHTENGINE_API_USER")
+SIGHTENGINE_API_SECRET = bot_config.env_str("SIGHTENGINE_API_SECRET")
 SIGHTENGINE_URL = "https://api.sightengine.com/1.0/check.json"
 SIGHTENGINE_MODELS = "genai,nudity-2.0,offensive-2.0,gore-2.0"
 SIGHTENGINE_MODERATION_MODELS = "nudity-2.0,offensive-2.0,gore-2.0"
 
-AI_SCORE_THRESHOLD = _float_env("AI_SCORE_THRESHOLD", 90.0)        # en %
-MODERATION_THRESHOLD = _float_env("MODERATION_THRESHOLD", 80.0)    # en %
-MODERATION_TEMPLATE = os.getenv("MODERATION_TEMPLATE", "").strip()
-MODERATE_ALWAYS = os.getenv("MODERATE_ALWAYS", "0").strip().lower() in ("1", "true", "oui", "yes")
+AI_SCORE_THRESHOLD = bot_config.env_float("AI_SCORE_THRESHOLD", 90.0)        # en %
+MODERATION_THRESHOLD = bot_config.env_float("MODERATION_THRESHOLD", 80.0)    # en %
+MODERATION_TEMPLATE = bot_config.env_str("MODERATION_TEMPLATE")
+MODERATE_ALWAYS = bot_config.env_bool("MODERATE_ALWAYS", False)
 
-TAG_TEMPLATE = "{{image IA}}\n"
-EDIT_SUMMARY_AI = "Bot : ajout de {{image IA}} (détection automatique : %s)"
+TAG_TEMPLATE = "{{SI|Image IA|BotJanus}}\n"             # sans pourcentage connu
+TAG_TEMPLATE_PERCENT = "{{SI|Image IA (%s%%)|BotJanus}}\n"  # avec le score SightEngine
+
+
+def build_ai_tag(ai_score):
+    """Bandeau à placer en haut de la page : pourcentage inclus s'il y en a un."""
+    if ai_score is None:
+        return TAG_TEMPLATE
+    return TAG_TEMPLATE_PERCENT % int(round(ai_score))
+EDIT_SUMMARY_AI = "Bot : ajout du bandeau Image IA (détection automatique : %s)"
 EDIT_SUMMARY_MODERATION = "Bot : signalement d'un contenu potentiellement inapproprié (%s)"
-POLL_INTERVAL = int(_float_env("AI_POLL_INTERVAL", 60))   # secondes
 HTTP_TIMEOUT = 20
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 USER_AGENT = "BotJanus-ai-detector/2.0 (Vikidia bot)"
 
-AI_DETECTOR_WEBHOOK_URL = os.getenv("AI_DETECTOR_WEBHOOK_URL", "").strip()
 EMBED_COLOR_AI_DETECTED = 0xE74C3C
 EMBED_COLOR_CLEAN = 0x2ECC71
 EMBED_COLOR_SKIP = 0x95A5A6
@@ -575,24 +558,14 @@ def detect_ai_image(image_bytes, image_url=""):
 # ==========================================================================
 
 def send_discord_embed(title, description, color, fields=None, thumbnail_url=None):
-    """Envoie un embed via webhook. Ne lève jamais."""
-    if not AI_DETECTOR_WEBHOOK_URL:
-        return
-    embed = {
-        "title": title[:256], "description": description[:4000], "color": color,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "footer": {"text": "ai_detector · pipeline 3 étapes"},
-    }
-    if fields:
-        embed["fields"] = [{"name": n, "value": str(v)[:1000], "inline": i} for n, v, i in fields]
-    if thumbnail_url:
-        embed["thumbnail"] = {"url": thumbnail_url}
+    """Envoie un embed via discord_logger (pas de webhook dédié). Ne lève jamais."""
+    embed = discord_logger.build_embed(title, description, color, fields=fields,
+                                       thumbnail_url=thumbnail_url, footer="ai_detector")
     try:
-        r = requests.post(AI_DETECTOR_WEBHOOK_URL, json={"embeds": [embed]}, timeout=10)
-        if r.status_code >= 300:
-            log.warning("Webhook Discord : réponse %s : %s", r.status_code, r.text[:200])
-    except requests.exceptions.RequestException as e:
-        log.warning("Webhook Discord : envoi impossible : %s", e)
+        if not discord_logger.send_embed(embed):
+            log.debug("discord_logger non installé : embed non envoyé.")
+    except Exception as e:
+        log.warning("Embed Discord : envoi impossible : %s", e)
 
 
 # ==========================================================================
@@ -604,6 +577,11 @@ def _has_template(text, name):
                      text, re.I) is not None
 
 
+def _has_ai_si_banner(text):
+    """Détecte {{SI|Image IA ...}} (avec ou sans pourcentage)."""
+    return re.search(r"\{\{\s*SI\s*\|\s*Image[ _]IA", text, re.I) is not None
+
+
 def process_file_page(site, page_title, dry_run=False):
     try:
         file_page = pywikibot.FilePage(site, page_title)
@@ -611,7 +589,7 @@ def process_file_page(site, page_title, dry_run=False):
             log.error("La page %s n'existe pas.", page_title)
             return
         text = file_page.text
-        already_ai = _has_template(text, "image IA")
+        already_ai = _has_template(text, "image IA") or _has_ai_si_banner(text)
         mod_name = MODERATION_TEMPLATE.strip("{}").split("|")[0] if MODERATION_TEMPLATE else ""
         already_mod = bool(mod_name) and _has_template(text, mod_name)
 
@@ -643,7 +621,7 @@ def process_file_page(site, page_title, dry_run=False):
             fields.append(("Preuves", "\n".join(res.evidence)[:900], False))
 
         if res.is_ai and not already_ai:
-            new_text = TAG_TEMPLATE + new_text
+            new_text = build_ai_tag(res.ai_score) + new_text
             summaries.append(EDIT_SUMMARY_AI % res.source)
 
         mod = res.moderation
@@ -678,76 +656,44 @@ def process_file_page(site, page_title, dry_run=False):
                            "**%s**\n```%s```" % (page_title, str(e)[:500]), EMBED_COLOR_ERROR)
 
 
-AI_STATE_FILE = "ai_detector_state.txt"     # état PROPRE à ce détecteur (voir note ci-dessous)
+_seen_logids = set()
 
 
-def _load_ai_state():
+def run_cycle(site, since, dry_run=False):
+    """Un passage : analyse les téléversements depuis `since`.
+    Renvoie True si le journal a pu être lu."""
+    count = 0
     try:
-        with open(AI_STATE_FILE, "r") as f:
-            return pywikibot.Timestamp.fromISOformat(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        return None
+        events = cycle.upload_events(site, since)
+    except Exception as e:
+        log.error("Erreur dans la boucle de surveillance IA : %s", e)
+        return False
 
-
-def _save_ai_state(ts):
-    try:
-        with open(AI_STATE_FILE, "w") as f:
-            f.write(ts.isoformat())
-    except OSError as e:
-        log.warning("Impossible d'écrire %s : %s", AI_STATE_FILE, e)
-
-
-def watch_uploads_for_ai(site, dry_run=False):
-    """Sonde le journal des téléversements.
-
-    On n'utilise PAS l'heure partagée bot_state.txt : les deux autres bots la font
-    avancer à chaque cycle, ce qui faisait « sauter » à ce détecteur les fichiers
-    téléversés entre deux de ses passages. Il garde donc son propre curseur
-    (ai_detector_state.txt), mis à jour uniquement après traitement.
-    """
-    last_timestamp = _load_ai_state()
-    if last_timestamp is not None:
-        log.info("Reprise depuis le dernier téléversement traité (%s UTC).", last_timestamp.isoformat())
-    else:
-        last_timestamp = pywikibot.Timestamp.now()
-        _save_ai_state(last_timestamp)
-        log.info("Premier lancement : surveillance à partir de maintenant (%s UTC).",
-                 last_timestamp.isoformat())
-    last_logid = None
-    log.info("Sondage du journal des téléversements toutes les %d s.", POLL_INTERVAL)
-
-    while True:
-        count = 0
+    for event in events:
         try:
-            for event in list(site.logevents(logtype="upload", start=last_timestamp, reverse=True)):
-                try:
-                    logid = event.logid()
-                except Exception:
-                    logid = None
-                if last_logid is not None and logid == last_logid:
-                    continue
-                count += 1
-                try:
-                    process_file_page(site, event.page().title(), dry_run=dry_run)
-                except Exception as e:
-                    log.error("Erreur sur l'événement de téléversement : %s", e)
-                last_timestamp, last_logid = event.timestamp(), logid
-                _save_ai_state(last_timestamp)
+            logid = event.logid()
+        except Exception:
+            logid = None
+        if logid is not None and logid in _seen_logids:
+            continue
+        count += 1
+        try:
+            process_file_page(site, event.page().title(), dry_run=dry_run)
         except Exception as e:
-            log.error("Erreur dans la boucle de surveillance IA : %s", e)
-        log.info("Sondage terminé : %d téléversement(s) examiné(s). Prochain passage dans %d s.",
-                 count, POLL_INTERVAL)
-        time.sleep(POLL_INTERVAL)
+            log.error("Erreur sur l'événement de téléversement : %s", e)
+        if logid is not None:
+            _seen_logids.add(logid)
 
-
-def _log_config():
-    log.info("Config : c2pa-python=%s exifread=%s Pillow=%s | OpenAI=%s | SightEngine=%s",
-             "oui" if c2pa else "NON", "oui" if exifread else "NON", "oui" if Image else "NON",
-             ("configuré" if OPENAI_API_KEY else "non configuré (étape ignorée)") + ("" if OpenAI else " [paquet openai absent]"),
-             "configuré" if SIGHTENGINE_API_USER and SIGHTENGINE_API_SECRET else "NON CONFIGURÉ")
+    if len(_seen_logids) > 5000:
+        _seen_logids.clear()
+    if count:   # silence quand il ne s'est rien passé
+        log.info("Sondage terminé : %d téléversement(s) examiné(s).", count)
+    return True
 
 
 def main():
+    import config_check
+
     parser = argparse.ArgumentParser(description="Détection d'images IA (pipeline à 3 étapes).")
     parser.add_argument("positional_file", nargs="?", default=None, help="Fichier wiki à tester")
     parser.add_argument("--file", "-f", dest="option_file", default=None)
@@ -756,23 +702,27 @@ def main():
     parser.add_argument("--dry-run", "--dry-oui", action="store_true", dest="dry_run")
     args = parser.parse_args()
 
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
-                            stream=sys.stdout)
-    _log_config()
+    bot_config.setup_logging()
+    if not discord_logger.is_installed():      # lancement autonome (hors main.py)
+        discord_logger.install()
 
     if args.local_path:
+        config_check.run(None, scripts=("ai",))
         with open(args.local_path, "rb") as f:
             res = detect_ai_image(f.read())
         print(json.dumps(res.__dict__, default=lambda o: o.__dict__, ensure_ascii=False, indent=2))
         return
 
     site = pywikibot.Site()  # code/famille : user-config.py (mylang, family)
+    config_check.run(site, scripts=("ai",))
     target = args.option_file or args.positional_file
     if target:
         process_file_page(site, target, dry_run=args.dry_run)
     else:
-        watch_uploads_for_ai(site, dry_run=args.dry_run)
+        try:
+            cycle.run_loop(site, [("ai_detector", lambda site, since: run_cycle(site, since, dry_run=args.dry_run))])
+        except KeyboardInterrupt:
+            log.info("Arrêt demandé (Ctrl+C), fin du détecteur IA.")
 
 
 if __name__ == "__main__":
