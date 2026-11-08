@@ -28,7 +28,7 @@ plusieurs pages ; le verdict mémorisé sert à agir sur les ajouts suivants.
 
 Réglages (.env, tous facultatifs) :
     RC_FILES_DRY_RUN=1       simulation : aucune écriture sur le wiki
-    RC_FILES_NAMESPACES=0|1  espaces de noms surveillés (défaut : tous sauf Fichier)
+    RC_FILES_NAMESPACES=0|2  espaces de noms surveillés (défaut : 0 = articles seulement ; vide = tous sauf Fichier)
 """
 
 import logging
@@ -57,7 +57,7 @@ import patrol_actions
 # ==========================================================================
 
 DRY_RUN = bot_config.env_bool("RC_FILES_DRY_RUN", False)
-NAMESPACES = bot_config.env_str("RC_FILES_NAMESPACES")        # ex. "0|1|2" ; vide = tous
+NAMESPACES = bot_config.env_str("RC_FILES_NAMESPACES", "0")   # 0 = articles seulement ; ex. "0|2" ; vide = tous
 FILE_NAMESPACE = 6
 MAX_RC_ENTRIES = 5000          # garde-fou : modifications lues par cycle
 REVISION_BATCH = 25            # révisions demandées par appel API

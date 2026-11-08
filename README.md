@@ -49,7 +49,7 @@ Les mêmes lignes vont dans les logs (en `WARNING`, jamais `ERROR`, pour ne pas 
 | `OPENAI_API_KEY` | Étape 2 de l'analyse IA (ignorée si absente) |
 | `SIGHTENGINE_API_USER` / `SIGHTENGINE_API_SECRET` | Étape 3 de l'analyse IA |
 | `RC_FILES_DRY_RUN` | `1` = `recent_files_bot` simule (aucune révocation, aucune demande, aucune écriture). **À essayer d'abord.** |
-| `RC_FILES_NAMESPACES` | Espaces de noms surveillés par `recent_files_bot`, ex. `0\|1\|2` (défaut : tous sauf Fichier). |
+| `RC_FILES_NAMESPACES` | Espaces de noms surveillés par `recent_files_bot`, ex. `0\|1\|2` (défaut : `0` = articles seulement ; vide = tous sauf Fichier). |
 | `BULLETIN_PATROUILLEURS` | Salon Discord (identifiant, avec `DISCORD_BOT_TOKEN`) **ou URL de webhook** où sont copiés, sans miniature, les embeds « image non admissible » (Vikidia et Common). Vide = aucune copie. |
 | `AI_SCORE_THRESHOLD` / `MODERATION_THRESHOLD` / `MODERATION_TEMPLATE` / `MODERATE_ALWAYS` | Réglages de l'analyse IA. Image non admissible sur Vikidia : `{{SI\|Image inappropriée\|BotJanus}}` (ou `MODERATION_TEMPLATE`) + demande de masquage. |
 
