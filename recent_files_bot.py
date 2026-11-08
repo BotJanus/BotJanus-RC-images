@@ -595,12 +595,12 @@ def run_cycle(site, since, dry_run=DRY_RUN):
         log.error("Erreur lors de la lecture des modifications récentes : %s", e)
         return False
 
-    log.info("Modifications récentes : %d lue(s) depuis %s.", len(entries), bot_clock.iso(since))
+    log.debug("Modifications récentes : %d lue(s) depuis %s.", len(entries), bot_clock.iso(since))
     fresh = [rc for rc in entries
              if rc.get("revid") and int(rc["revid"]) not in _seen_revids
              and rc.get("ns") != FILE_NAMESPACE]
     if not fresh:
-        log.info("Aucune nouvelle modification à examiner.")
+        log.debug("Aucune nouvelle modification à examiner.")
         return True
     try:
         texts = fetch_revision_texts(
@@ -641,8 +641,11 @@ def run_cycle(site, since, dry_run=DRY_RUN):
 
     if len(_seen_revids) > 5000:
         _seen_revids.clear()
-    log.info("Sondage terminé : %d modification(s) nouvelle(s), dont %d ajoutant des fichiers.",
-             len(fresh), examined)
+    if examined:      # silence tant qu'aucun fichier n'est ajouté
+        log.info("Sondage terminé : %d modification(s) nouvelle(s), dont %d ajoutant des fichiers.",
+                 len(fresh), examined)
+    else:
+        log.debug("Sondage terminé : %d modification(s) nouvelle(s), aucune n'ajoute de fichier.", len(fresh))
     return not to_retry
 
 
