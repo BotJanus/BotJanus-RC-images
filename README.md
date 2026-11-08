@@ -44,6 +44,7 @@ Les mêmes lignes vont dans les logs (en `WARNING`, jamais `ERROR`, pour ne pas 
 |---|---|
 | `DISCORD_BOT_TOKEN` + `DISCORD_LOG_CHANNEL_ID` *ou* `DISCORD_WEBHOOK_URL` | Logs et embeds Discord |
 | `COMMONS_API` | URL de `api.php` du dépôt Common (ex. `https://commons.wikimedia.org/w/api.php`). Sinon détecté automatiquement via le wiki. |
+| `COMMONS_USER_AGENT` | User-Agent des requêtes vers Common/Wikimedia (défaut : nom du bot + page `Utilisateur:BotJanus`). Wikimedia exige un contact, sinon `429 Too Many Requests`. |
 | `COMMONS_SIMILARITY` | Seuil de similarité des noms (défaut `0.92`) |
 | `OPENAI_API_KEY` | Étape 2 de l'analyse IA (ignorée si absente) |
 | `SIGHTENGINE_API_USER` / `SIGHTENGINE_API_SECRET` | Étape 3 de l'analyse IA |

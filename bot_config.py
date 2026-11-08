@@ -30,6 +30,16 @@ BOT_DESCRIPTION = "Surveillance des téléversements : licences, nettoyage des i
 BOT_TITLE = "📡 **%s** — %s" % (BOT_NAME, BOT_DESCRIPTION)     # en-tête des messages de log Discord
 SERVICE_ID = os.environ.get("BOTJANUS_SERVICE_ID", "rc-images")
 
+# User-Agent des requêtes vers Common / Wikimedia. Leur politique exige un nom de bot ET un moyen de
+# contact (URL ou e-mail), sinon upload.wikimedia.org répond « 429 Too Many Requests ».
+# Surchargeable avec COMMONS_USER_AGENT (.env).
+DEFAULT_USER_AGENT = ("BotJanus-RC-images/3.0 (https://fr.vikidia.org/wiki/Utilisateur:BotJanus; "
+                      "bot Vikidia) python-requests")
+
+
+def user_agent():
+    return os.environ.get("COMMONS_USER_AGENT", "").strip() or DEFAULT_USER_AGENT
+
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
 _ENV_CANDIDATES = (

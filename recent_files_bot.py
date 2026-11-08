@@ -32,12 +32,15 @@ Réglages (.env, tous facultatifs) :
 """
 
 import logging
+import io
 import re
+import time
 import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional
 
 import pywikibot
+import requests
 
 import ai_detector
 import bot_clock
@@ -318,17 +321,50 @@ class Indeterminate(Exception):
     """Analyse impossible pour l'instant (réseau, quota, clé...) : à refaire au cycle suivant."""
 
 
+DOWNLOAD_TIMEOUT = 30
+DOWNLOAD_TRIES = 3
+MAX_RETRY_AFTER = 30           # secondes : on n'attend pas plus longtemps un « 429 »
+
+
+def download_commons(url):
+    """Télécharge un fichier de Common avec un User-Agent conforme à la politique de Wikimedia
+    (nom du bot + contact). « 429 » : on patiente (Retry-After) puis on réessaie.
+    Lève ValueError si le fichier dépasse la taille permise, requests.RequestException sinon."""
+    last = None
+    for attempt in range(DOWNLOAD_TRIES):
+        resp = requests.get(url, headers={"User-Agent": bot_config.user_agent()},
+                            timeout=DOWNLOAD_TIMEOUT, stream=True)
+        if resp.status_code == 429:
+            try:
+                wait = min(float(resp.headers.get("Retry-After", 5)), MAX_RETRY_AFTER)
+            except ValueError:
+                wait = 5
+            last = requests.HTTPError("429 Too Many Requests", response=resp)
+            log.warning("Common répond 429 (essai %d/%d) : pause de %.0f s.", attempt + 1, DOWNLOAD_TRIES, wait)
+            resp.close()
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        buf = io.BytesIO()
+        for chunk in resp.iter_content(65536):
+            buf.write(chunk)
+            if buf.tell() > ai_detector.MAX_IMAGE_BYTES:
+                raise ValueError("image trop volumineuse")
+        return buf.getvalue()
+    raise last
+
+
 def analyze_shared(info):
     """IA + admissibilité d'une image de Common. Renvoie le verdict (dict, cf. file_cache).
     Lève Indeterminate si l'admissibilité n'a pas pu être contrôlée (on ne conclut jamais à
     la légère : ni révocation, ni « image saine »)."""
     thumb_only = False
     try:
-        data = ai_detector.download_image(info.url)
+        data = download_commons(info.url)
     except ValueError:                                  # trop volumineuse : miniature, modération seule
         if not info.thumb:
             raise Indeterminate("image trop volumineuse et sans miniature")
-        data, thumb_only = ai_detector.download_image(info.thumb), True
+        data, thumb_only = download_commons(info.thumb), True
     except Exception as e:                              # noqa: BLE001
         raise Indeterminate("téléchargement impossible : %s" % e)
 
@@ -496,6 +532,8 @@ def process_entry(site, rc, names, dry_run):
             retry = True
             continue
         if verdict is None:
+            log.info("%s (%s) : contrôles faits, rien à signaler.", name,
+                     "Vikidia" if info.repo == "local" else "Common")
             continue
         if verdict.get("flagged"):
             flagged.append((info, verdict))
@@ -557,10 +595,12 @@ def run_cycle(site, since, dry_run=DRY_RUN):
         log.error("Erreur lors de la lecture des modifications récentes : %s", e)
         return False
 
+    log.info("Modifications récentes : %d lue(s) depuis %s.", len(entries), bot_clock.iso(since))
     fresh = [rc for rc in entries
              if rc.get("revid") and int(rc["revid"]) not in _seen_revids
              and rc.get("ns") != FILE_NAMESPACE]
     if not fresh:
+        log.info("Aucune nouvelle modification à examiner.")
         return True
     try:
         texts = fetch_revision_texts(
@@ -601,8 +641,8 @@ def run_cycle(site, since, dry_run=DRY_RUN):
 
     if len(_seen_revids) > 5000:
         _seen_revids.clear()
-    if examined:
-        log.info("Sondage terminé : %d modification(s) ajoutant des fichiers examinée(s).", examined)
+    log.info("Sondage terminé : %d modification(s) nouvelle(s), dont %d ajoutant des fichiers.",
+             len(fresh), examined)
     return not to_retry
 
 
