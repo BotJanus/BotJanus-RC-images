@@ -6,7 +6,7 @@ Launcher — BotJanus RC-images.
 Surveillance des téléversements : licences, nettoyage des images supprimées et analyse IA.
 (Nom et description : bot_config.BOT_NAME / BOT_DESCRIPTION.)
 
-Lance les 3 scripts — license_bot.py, image_cleanup_bot.py, ai_detector.py — dans UN SEUL
+Lance les 4 scripts — license_bot.py, image_cleanup_bot.py, ai_detector.py, recent_files_bot.py — dans UN SEUL
 cycle commun, toutes les 10 minutes, à la suite, avec une heure et un état partagés
 (bot_clock.py, bot_state.py, boucle dans cycle.py).
 
@@ -29,6 +29,7 @@ import cycle
 import discord_logger
 import image_cleanup_bot
 import license_bot
+import recent_files_bot
 
 bot_config.setup_logging()
 log = logging.getLogger("launcher")
@@ -67,6 +68,7 @@ def main():
         ("license_bot", license_bot.run_cycle),
         ("image_cleanup_bot", image_cleanup_bot.run_cycle),
         ("ai_detector", ai_detector.run_cycle),
+        ("recent_files_bot", recent_files_bot.run_cycle),
     ]
     try:
         cycle.run_loop(site, steps)

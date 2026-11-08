@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bot_state — état partagé entre les 3 scripts (license_bot, image_cleanup_bot, ai_detector).
+bot_state — état partagé entre les 4 scripts (license_bot, image_cleanup_bot, ai_detector, recent_files_bot).
 
 Un seul fichier (bot_state.txt, JSON) contient deux heures, toutes lues via bot_clock :
 
@@ -33,7 +33,7 @@ log = logging.getLogger("bot_state")
 
 STATE_FILE = os.path.join(bot_config.DATA_DIR, "bot_state.txt")
 
-POLL_INTERVAL = 600          # secondes : un cycle commun aux 3 scripts toutes les 10 minutes
+POLL_INTERVAL = 600          # secondes : un cycle commun aux 4 scripts toutes les 10 minutes
 OVERLAP_MARGIN = 60          # secondes de chevauchement entre deux fenêtres (doublons filtrés par logid)
 HEARTBEAT_INTERVAL = 30      # secondes entre deux battements
 MAX_CYCLE_SECONDS = 1800     # un cycle plus long est considéré bloqué : on cesse de battre
