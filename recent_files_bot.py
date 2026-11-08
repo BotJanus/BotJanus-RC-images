@@ -42,6 +42,7 @@ import pywikibot
 import ai_detector
 import bot_clock
 import bot_config
+import common_repo
 import cycle
 import discord_logger
 import file_cache
@@ -254,9 +255,44 @@ class FileInfo:
         return is_raster_image(self.mime, self.name)
 
 
+_commons = {}
+
+
+def commons_repo(site):
+    """Dépôt Common (COMMONS_API du .env, sinon détecté via le wiki), partagé avec le reste du bot."""
+    if site not in _commons:
+        _commons[site] = common_repo.CommonRepo(site)
+    return _commons[site]
+
+
+def _commons_lookup(site, name):
+    """Le fichier existe-t-il sur Common ? Interrogé directement via COMMONS_API : le wiki n'a pas
+    forcément Common comme dépôt partagé. FileInfo(repo="shared") ou None.
+    Lève common_repo.CommonError si Common est injoignable (on réessaiera)."""
+    repo = commons_repo(site)
+    if not repo.api_url():
+        return None
+    q = repo._query(titles="File:" + name, prop="imageinfo", iiprop="url|sha1|mime|size|timestamp",
+                    iiurlwidth=THUMB_WIDTH)
+    for page in q.get("pages", []) or []:
+        infos = page.get("imageinfo") or []
+        if page.get("missing") or page.get("invalid") or not infos:
+            return None
+        ii = infos[0]
+        return FileInfo(name=name, repo="shared", url=ii.get("url", ""), thumb=ii.get("thumburl", ""),
+                        sha1=ii.get("sha1", ""), mime=ii.get("mime", ""), timestamp=ii.get("timestamp", ""))
+    return None
+
+
 def lookup_file(site, name):
     """Où est le fichier ? FileInfo (local / shared) ou None s'il n'existe nulle part.
-    Une seule requête : l'API dit si le fichier vient de Vikidia ou du dépôt partagé."""
+    1. Vikidia (et dépôt partagé éventuel du wiki) : une requête, l'API dit d'où vient le fichier ;
+    2. sinon Common, interrogé directement (COMMONS_API)."""
+    info = _wiki_lookup(site, name)
+    return info if info is not None else _commons_lookup(site, name)
+
+
+def _wiki_lookup(site, name):
     data = site.simple_request(action="query", titles="File:" + name, prop="imageinfo|info",
                                iiprop="url|sha1|mime|size|timestamp", iiurlwidth=THUMB_WIDTH,
                                formatversion=2).submit()

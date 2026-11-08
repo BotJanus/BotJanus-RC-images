@@ -240,9 +240,14 @@ def _recent_checks(site):
         data = site.simple_request(action="query", meta="siteinfo", siprop="repos").submit()
         repos = [r.get("displayname") or r.get("name") for r in (data.get("query", {}) or {}).get("repos", []) or []
                  if r.get("name") != "local"]
-        checks.append(Check(OK if repos else WARN, "Dépôt partagé (Common)",
-                            ", ".join(repos) if repos else
-                            "aucun dépôt partagé déclaré par le wiki : les images de Common ne seront pas reconnues"))
+        api = rf.commons_repo(site).api_url()
+        if repos or api:
+            checks.append(Check(OK, "Common (fichiers ajoutés)",
+                                "via %s%s" % (api or ", ".join(repos),
+                                              " + dépôt partagé du wiki" if repos and api else "")))
+        else:
+            checks.append(Check(WARN, "Common (fichiers ajoutés)",
+                                "ni dépôt partagé ni COMMONS_API : les images de Common ne seront pas reconnues"))
     except Exception as e:                                    # noqa: BLE001
         checks.append(Check(ERR, "Résolution des fichiers", "requête impossible : %s" % e))
 
