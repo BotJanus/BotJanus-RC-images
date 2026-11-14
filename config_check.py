@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-config_check — contrôle de configuration des 3 scripts, au démarrage.
+config_check — contrôle de configuration des 4 scripts, au démarrage.
 
 Vérifie que tout est *chargé* (modules, clés, listes) ET *utilisable* (connexion au wiki,
 droits, journaux lisibles, Common joignable, clé OpenAI acceptée...), puis publie le
@@ -36,6 +36,7 @@ SECTION_TITLES = {
     "license": "📜 license_bot — licences",
     "cleanup": "🧹 image_cleanup_bot — nettoyage",
     "ai": "🤖 ai_detector — analyse IA",
+    "recent": "🖼️ recent_files_bot — fichiers ajoutés",
 }
 
 
@@ -110,6 +111,11 @@ def _common_checks(site):
     checks.append(Check(OK if mode else WARN, "Discord",
                         {"bot": "compte bot", "webhook": "webhook"}.get(mode) or
                         "logs et embeds désactivés (DISCORD_BOT_TOKEN + DISCORD_LOG_CHANNEL_ID, ou DISCORD_WEBHOOK_URL)"))
+    import file_cache
+    in_code = file_cache.is_in_code_dir()
+    checks.append(Check(WARN if in_code else OK, "Mémoire des analyses",
+                        "%s : dans le dossier du code, perdue à chaque rebuild Docker (monter /data)"
+                        % file_cache.CACHE_FILE if in_code else file_cache.CACHE_FILE))
     env_files = bot_config.load_env()
     checks.append(Check(OK if env_files else WARN, "Fichier d'environnement",
                         ", ".join(p.rsplit("/", 1)[-1] for p in env_files) if env_files else
@@ -203,19 +209,64 @@ def _ai_checks(_site):
                             "SIGHTENGINE_API_USER / SIGHTENGINE_API_SECRET absents : aucune image ne pourra être tranchée"))
     checks.append(Check(OK, "Seuils", "IA ≥ %g %%, modération ≥ %g %%, %s" % (
         ai.AI_SCORE_THRESHOLD, ai.MODERATION_THRESHOLD,
-        "modèle %s" % ai.MODERATION_TEMPLATE if ai.MODERATION_TEMPLATE else "modération : alerte Discord seulement")))
+        "image non admissible : %s + demande de masquage" % ai.MODERATION_TAG)))
+    target = bot_config.env_str("BULLETIN_PATROUILLEURS")
+    if not target:
+        checks.append(Check(WARN, "Bulletin patrouilleurs", "BULLETIN_PATROUILLEURS absent : aucune copie des alertes"))
+    elif not target.startswith("http") and not bot_config.env_str("DISCORD_BOT_TOKEN"):
+        checks.append(Check(ERR, "Bulletin patrouilleurs", "salon défini mais DISCORD_BOT_TOKEN absent (ou mettre l'URL d'un webhook)"))
+    else:
+        checks.append(Check(OK, "Bulletin patrouilleurs", "webhook" if target.startswith("http") else "salon %s" % target))
+    return checks
+
+
+def _recent_checks(site):
+    import recent_files_bot as rf
+
+    checks = []
+    if rf.DRY_RUN:
+        checks.append(Check(WARN, "Mode", "DRY_RUN actif (RC_FILES_DRY_RUN) : aucune écriture sur le wiki"))
+    if site is None:
+        return checks + [Check(WARN, "Modifications récentes", "non vérifiées (pas de wiki)")]
+
+    try:
+        next(iter(site.recentchanges(total=1)), None)
+        checks.append(Check(OK, "Modifications récentes", "lisibles"))
+    except Exception as e:                                    # noqa: BLE001
+        checks.append(Check(ERR, "Modifications récentes", "illisibles : %s" % e))
+
+    try:
+        rf.lookup_file(site, "Example.jpg")          # la requête doit simplement aboutir
+        data = site.simple_request(action="query", meta="siteinfo", siprop="repos").submit()
+        repos = [r.get("displayname") or r.get("name") for r in (data.get("query", {}) or {}).get("repos", []) or []
+                 if r.get("name") != "local"]
+        api = rf.commons_repo(site).api_url()
+        if repos or api:
+            checks.append(Check(OK, "Common (fichiers ajoutés)",
+                                "via %s%s" % (api or ", ".join(repos),
+                                              " + dépôt partagé du wiki" if repos and api else "")))
+        else:
+            checks.append(Check(WARN, "Common (fichiers ajoutés)",
+                                "ni dépôt partagé ni COMMONS_API : les images de Common ne seront pas reconnues"))
+    except Exception as e:                                    # noqa: BLE001
+        checks.append(Check(ERR, "Résolution des fichiers", "requête impossible : %s" % e))
+
+    checks.append(Check(OK if site.has_right("edit") else ERR, "Révocation / demande admin",
+                        "droit d'édition présent" if site.has_right("edit") else
+                        "pas de droit d'édition : révocation et demandes impossibles"))
+    checks.append(Check(OK, "Demandes de masquage", rf.admin_request_title()))
     return checks
 
 
 _BUILDERS = {"common": _common_checks, "license": _license_checks,
-             "cleanup": _cleanup_checks, "ai": _ai_checks}
+             "cleanup": _cleanup_checks, "ai": _ai_checks, "recent": _recent_checks}
 
 
 # --------------------------------------------------------------------------
 # Rapport
 # --------------------------------------------------------------------------
 
-def collect(site, scripts=("license", "cleanup", "ai")):
+def collect(site, scripts=("license", "cleanup", "ai", "recent")):
     report = Report()
     for key in ("common",) + tuple(scripts):
         report.sections.append((key, _guard(SECTION_TITLES[key], lambda k=key: _BUILDERS[k](site))))
@@ -251,7 +302,7 @@ def send_embed(report):
     return discord_logger.send_embed(embed)
 
 
-def run(site, scripts=("license", "cleanup", "ai")):
+def run(site, scripts=("license", "cleanup", "ai", "recent")):
     """Collecte, logue et envoie l'embed. Ne lève jamais. Renvoie le Report."""
     try:
         report = collect(site, scripts)

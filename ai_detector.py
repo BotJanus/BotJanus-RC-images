@@ -23,8 +23,9 @@ Variables d'environnement (ou fichier .env / env/agent.env, chargés par bot_con
     SIGHTENGINE_API_SECRET    secret SightEngine (étape 3)
     AI_SCORE_THRESHOLD        seuil `ai_generated` en % (défaut 90)
     MODERATION_THRESHOLD      seuil de modération en % (défaut 80)
-    MODERATION_TEMPLATE       modèle wiki posé si contenu inapproprié, ex. {{Image inappropriée}}
-                              (vide par défaut = alerte Discord uniquement, aucune écriture)
+    MODERATION_TEMPLATE       modèle wiki posé si contenu inapproprié (défaut : {{SI|Image inappropriée|BotJanus}}) ;
+                              une demande de masquage est aussi déposée sur Vikidia:Demandes aux administrateurs/AAAA MM
+                              et l'embed est copié vers BULLETIN_PATROUILLEURS
     MODERATE_ALWAYS           "1" = modérer même si l'étape 1/2 conclut déjà à de l'IA
                               (1 appel SightEngine supplémentaire ; défaut : 0)
     (les embeds Discord passent par discord_logger : DISCORD_BOT_TOKEN + DISCORD_LOG_CHANNEL_ID,
@@ -45,6 +46,8 @@ import bot_clock
 import bot_config
 import cycle
 import discord_logger
+import file_cache
+import patrol_actions
 
 try:                                    # pywikibot n'est requis que pour le mode wiki
     import pywikibot
@@ -84,6 +87,8 @@ SIGHTENGINE_MODERATION_MODELS = "nudity-2.0,offensive-2.0,gore-2.0"
 AI_SCORE_THRESHOLD = bot_config.env_float("AI_SCORE_THRESHOLD", 90.0)        # en %
 MODERATION_THRESHOLD = bot_config.env_float("MODERATION_THRESHOLD", 80.0)    # en %
 MODERATION_TEMPLATE = bot_config.env_str("MODERATION_TEMPLATE")
+# Image non admissible : {{SI}} posé par défaut (surchargeable avec MODERATION_TEMPLATE)
+MODERATION_TAG = MODERATION_TEMPLATE or "{{SI|Image inappropriée|BotJanus}}"
 MODERATE_ALWAYS = bot_config.env_bool("MODERATE_ALWAYS", False)
 
 TAG_TEMPLATE = "{{SI|Image IA|BotJanus}}\n"             # sans pourcentage connu
@@ -557,10 +562,13 @@ def detect_ai_image(image_bytes, image_url=""):
 # DISCORD
 # ==========================================================================
 
-def send_discord_embed(title, description, color, fields=None, thumbnail_url=None):
-    """Envoie un embed via discord_logger (pas de webhook dédié). Ne lève jamais."""
+def send_discord_embed(title, description, color, fields=None, thumbnail_url=None, bulletin=False):
+    """Envoie un embed via discord_logger (pas de webhook dédié). `bulletin=True` : copie aussi
+    vers BULLETIN_PATROUILLEURS. Ne lève jamais."""
     embed = discord_logger.build_embed(title, description, color, fields=fields,
                                        thumbnail_url=thumbnail_url, footer="ai_detector")
+    if bulletin:
+        patrol_actions.forward_bulletin(embed)
     try:
         if not discord_logger.send_embed(embed):
             log.debug("discord_logger non installé : embed non envoyé.")
@@ -582,7 +590,20 @@ def _has_ai_si_banner(text):
     return re.search(r"\{\{\s*SI\s*\|\s*Image[ _]IA", text, re.I) is not None
 
 
-def process_file_page(site, page_title, dry_run=False):
+def _result_from_verdict(v):
+    """DetectionResult reconstitué depuis un verdict mémorisé (file_cache)."""
+    res = DetectionResult(is_ai=v.get("ai"), source=v.get("ai_source") or "verdict mémorisé",
+                          ai_score=v.get("ai_score"))
+    if v.get("moderated"):
+        res.moderation = ModerationResult(flagged=bool(v.get("flagged")), reasons=list(v.get("reasons") or []))
+    return res
+
+
+def process_file_page(site, page_title, dry_run=False, request_hiding=True, forward=True):
+    """Analyse une page de fichier. Renvoie le DetectionResult, ou None (rien analysé / erreur).
+    Fichier déjà analysé et inchangé (file_cache) : pas de nouvelle analyse, le verdict mémorisé
+    est simplement ré-appliqué (étiquettes manquantes...).
+    request_hiding=False / forward=False : l'appelant s'en charge (recent_files_bot)."""
     try:
         file_page = pywikibot.FilePage(site, page_title)
         if not file_page.exists():
@@ -590,21 +611,33 @@ def process_file_page(site, page_title, dry_run=False):
             return
         text = file_page.text
         already_ai = _has_template(text, "image IA") or _has_ai_si_banner(text)
-        mod_name = MODERATION_TEMPLATE.strip("{}").split("|")[0] if MODERATION_TEMPLATE else ""
-        already_mod = bool(mod_name) and _has_template(text, mod_name)
+        mod_name = MODERATION_TAG.strip("{}").split("|")[0]
+        already_mod = _has_template(text, mod_name)
 
-        if already_ai and (already_mod or not MODERATION_TEMPLATE):
+        if already_ai and already_mod:
             log.info("%s : déjà balisé, passage.", page_title)
             return
 
         image_url = file_page.get_file_url()
         page_url = file_page.full_url()
-        log.info("Analyse de %s", page_title)
-        image_bytes = download_image(image_url)
-
-        res = detect_ai_image(image_bytes, image_url)
-        for e in res.errors:
-            log.warning("  [%s] %s", page_title, e)
+        try:
+            info = file_page.latest_file_info
+            sha1, version_ts = info.sha1, str(info.timestamp)
+        except Exception:                         # noqa: BLE001
+            sha1 = version_ts = ""
+        name = file_page.title(with_ns=False)
+        cached = file_cache.get("local", name, sha1, version_ts) if sha1 else None
+        if cached is not None:
+            log.info("%s : déjà analysée (verdict mémorisé), pas de nouvelle analyse.", page_title)
+            res = _result_from_verdict(cached)
+        else:
+            log.info("Analyse de %s", page_title)
+            image_bytes = download_image(image_url)
+            res = detect_ai_image(image_bytes, image_url)
+            for e in res.errors:
+                log.warning("  [%s] %s", page_title, e)
+            if res.is_ai is not None and not dry_run and sha1:
+                file_cache.put("local", name, sha1, version_ts, file_cache.verdict_from_result(res))
 
         if res.is_ai is None:
             send_discord_embed("⚠️ Analyse impossible",
@@ -614,6 +647,7 @@ def process_file_page(site, page_title, dry_run=False):
 
         new_text = text
         summaries = []
+        newly_flagged = False
         fields = [("Étape décisive", str(res.stage), True), ("Source", res.source, True)]
         if res.ai_score is not None:
             fields.append(("Score ai_generated", "%.1f %%" % res.ai_score, True))
@@ -627,9 +661,10 @@ def process_file_page(site, page_title, dry_run=False):
         mod = res.moderation
         if mod and mod.flagged:
             fields.append(("Modération", ", ".join(mod.reasons), False))
-            if MODERATION_TEMPLATE and not already_mod:
-                new_text = MODERATION_TEMPLATE + "\n" + new_text
+            if not _has_template(new_text, mod_name):          # pas de 2e {{SI}} si l'étiquette IA vient d'être posée
+                new_text = MODERATION_TAG + "\n" + new_text
                 summaries.append(EDIT_SUMMARY_MODERATION % ", ".join(mod.reasons))
+                newly_flagged = True
 
         if mod and mod.flagged:
             title, color = "🚩 Contenu potentiellement inapproprié", EMBED_COLOR_MODERATION
@@ -640,6 +675,8 @@ def process_file_page(site, page_title, dry_run=False):
         if dry_run:
             title, color = "🧪 [DRY-RUN] " + title, EMBED_COLOR_DRYRUN
 
+        if cached is not None and new_text == text:
+            return res                            # rien à ré-appliquer : pas de nouvel embed
         if new_text != text:
             if dry_run:
                 log.info("[DRY-RUN] %s : aurait été modifié (%s)", page_title, " + ".join(summaries))
@@ -648,7 +685,14 @@ def process_file_page(site, page_title, dry_run=False):
                 file_page.save(summary=" ; ".join(summaries), minor=False, bot=True)
                 log.info("✓ %s modifié (%s)", page_title, " + ".join(summaries))
         send_discord_embed(title, "[**%s**](%s)" % (page_title, page_url), color,
-                           fields=fields, thumbnail_url=image_url)
+                           fields=fields, thumbnail_url=image_url, bulletin=forward and bool(mod and mod.flagged))
+        if newly_flagged and request_hiding:
+            try:
+                patrol_actions.request_hiding(site, "[[:%s]]" % file_page.title(), file_page.title(),
+                                              dry_run, where="sur Vikidia", what="ce fichier")
+            except Exception as e:                # noqa: BLE001
+                log.error("Demande de masquage de %s impossible : %s", page_title, e)
+        return res
 
     except Exception as e:
         log.error("Erreur lors du traitement de %s : %s", page_title, e)

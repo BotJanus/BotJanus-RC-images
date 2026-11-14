@@ -85,7 +85,7 @@ class CommonRepo:
         self._resolved = False
         self.threshold = bot_config.env_float("COMMONS_SIMILARITY", 0.92)
         self._session = requests.Session()
-        self._session.headers["User-Agent"] = USER_AGENT
+        self._session.headers["User-Agent"] = bot_config.user_agent()
 
     # ---- détection du dépôt -------------------------------------------------
     def api_url(self):

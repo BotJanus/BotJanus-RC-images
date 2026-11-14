@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-cycle — la boucle commune aux 3 scripts (main.py ET les modes autonomes).
+cycle — la boucle commune aux 4 scripts (main.py ET les modes autonomes).
 
 Avant, la boucle « sonder / avancer la fenêtre / dormir » existait en 4 exemplaires
 (main.py + un par script). Elle n'existe plus qu'ici : chaque script expose

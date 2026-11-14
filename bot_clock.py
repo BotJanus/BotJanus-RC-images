@@ -25,6 +25,12 @@ try:                                    # le mode « test local » d'ai_detector
 except ImportError:                     # pragma: no cover
     _Timestamp = None
 
+try:
+    from zoneinfo import ZoneInfo
+    _PARIS = ZoneInfo("Europe/Paris")
+except Exception:                       # pragma: no cover  (tzdata absent)
+    _PARIS = None
+
 UTC = timezone.utc
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -73,6 +79,15 @@ def iso(dt=None):
     """Format texte unique : « 2026-10-29T11:08:00Z » (maintenant par défaut)."""
     dt = now() if dt is None else ensure_utc(dt)
     return dt.strftime(ISO_FORMAT)
+
+
+def month_label(dt=None):
+    """Mois en cours au format « 2026 11 » (heure de Paris, celle des pages de demandes
+    « Vikidia:Demandes aux administrateurs/AAAA MM »)."""
+    dt = now() if dt is None else ensure_utc(dt)
+    if _PARIS is not None:
+        dt = dt.astimezone(_PARIS)
+    return dt.strftime("%Y %m")
 
 
 def parse(text):
